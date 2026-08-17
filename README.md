@@ -4,9 +4,16 @@
 
 # BattleShip
 
+> **Work in progress: PS Vita port.** This fork adds an experimental PS Vita target
+> (`Makefile.vita`, a standalone VitaSDK build alongside the CMake build the other
+> platforms use) on top of upstream BattleShip. It builds, boots, and renders on both
+> the Vita3K emulator and real hardware, but is still under active debugging — crashes
+> during a full playthrough are expected. See [Building for PS Vita](#building-for-ps-vita)
+> below.
+
 **BattleShip** is a PC port of **Super Smash Bros. (N64)** — both the **US** (NTSC-U v1.0) and **Japanese** (Nintendo All-Star! Dairantou Smash Brothers) releases — built on top of the [VetriTheRetri/ssb-decomp-re](https://github.com/vetritheretri/ssb-decomp-re) decompilation, using [libultraship](https://github.com/Kenix3/libultraship) for PC-native rendering / audio / input and [Torch](https://github.com/HarbourMasters/Torch) for extracting assets out of the ROM at build time.
 
-Runs natively on macOS (Apple Silicon), Linux, Windows, and Android.
+Runs natively on macOS (Apple Silicon), Linux, Windows, Android, and (WIP) PS Vita.
 
 Download the high resolution texture pack from [GhostlyDark](https://github.com/GhostlyDark) [here!](https://evilgames.eu/texture-packs/ssb-reloaded.htm#pc)
 
@@ -125,6 +132,43 @@ I hope you enjoy the project.
 ## Building
 
 If you want to manually compile BattleShip, please consult the [building instructions](BUILDING.md).
+
+### Building for PS Vita
+
+The PS Vita target is **work in progress** and uses a standalone `Makefile.vita`
+instead of the CMake build the other platforms use — VitaSDK's toolchain doesn't fit
+this project's CMake setup cleanly, so the Vita build is hand-rolled to mirror what
+CMakeLists.txt does for every other platform.
+
+Prerequisites:
+
+- [VitaSDK](https://vitasdk.org) installed, with `$VITASDK` pointing at it and
+  `$VITASDK/bin` on your `PATH` (needed for `vita-make-fself`, `vita-mksfoex`,
+  `vita-pack-vpk`, `vita-elf-create`).
+- A build of vitaGL that predates the current upstream `vglDrawObjects` 2-arg API
+  (this codebase calls the older 3-arg form) — `Makefile.vita`'s `VITAGL_NOSPLASH_DIR`
+  variable currently points at a machine-specific path and will need adjusting to
+  wherever your own vitaGL build lives.
+- The same ROM/asset requirements as every other platform (see above) — the Vita
+  build does not extract assets on-device; extract `BattleShip.o2r` with `torch` on
+  desktop first (same as the other platforms) and copy it to
+  `ux0:data/battleship/BattleShip.o2r` on the memory card before first launch.
+
+Build:
+
+```sh
+export VITASDK=/usr/local/vitasdk   # wherever your VitaSDK install lives
+export PATH="$VITASDK/bin:$PATH"
+
+make -f Makefile.vita objects
+make -f Makefile.vita prepare
+make -f Makefile.vita build/battleship.vpk
+```
+
+This produces `build/battleship.vpk` (plus the intermediate `build/battleship.elf`,
+`build/battleship.velf`, `build/eboot.bin`, etc.) — install it with VitaShell or run
+it directly under [Vita3K](https://vita3k.org). Everything under `build/` is
+generated and gitignored; nothing there is checked into the repo.
 
 ## Architecture
 

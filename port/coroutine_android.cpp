@@ -14,7 +14,7 @@
  * time.
  */
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__vita__)
 
 #if !defined(__aarch64__) && !defined(__arm__)
 #  error "Android coroutine backend supports arm64-v8a (coroutine_aarch64.S) "  \
@@ -30,7 +30,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if !defined(__vita__)
 #include <sys/mman.h>
+#else
+#include <malloc.h>
+#endif
 #include <unistd.h>
 
 #define MIN_STACK_SIZE 32768
@@ -133,10 +137,21 @@ PortCoroutine *port_coroutine_create(void (*entry)(void *), void *arg, size_t st
     /* mmap the stack with a PROT_NONE guard page at the low end so a
      * coroutine stack overflow faults immediately instead of silently
      * corrupting adjacent heap. mmap returns page-aligned memory, which
-     * satisfies AAPCS64's 16-byte sp alignment requirement. */
+     * satisfies AAPCS64's 16-byte sp alignment requirement.
+     * Vita has no sys/mman.h (no page-protection API available to
+     * homebrew), so it just gets a plain aligned heap allocation with no
+     * guard page - same trade-off every other Vita homebrew makes. */
     long ps_v = sysconf(_SC_PAGESIZE);
     size_t ps = (ps_v > 0) ? (size_t)ps_v : 4096;
     stack_size = (stack_size + ps - 1) & ~(ps - 1);
+#if defined(__vita__)
+    co->stack_total = stack_size;
+    void *stk = memalign(ps, co->stack_total);
+    if (!stk) {
+        free(co);
+        return nullptr;
+    }
+#else
     co->stack_total = stack_size + ps;
     void *stk = mmap(nullptr, co->stack_total, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -145,6 +160,7 @@ PortCoroutine *port_coroutine_create(void (*entry)(void *), void *arg, size_t st
         return nullptr;
     }
     mprotect(stk, ps, PROT_NONE);
+#endif
     co->stack_mem  = stk;
     co->entry      = entry;
     co->arg        = arg;
@@ -177,7 +193,11 @@ void port_coroutine_destroy(PortCoroutine *co) {
         abort();
     }
     if (co->stack_mem) {
+#if defined(__vita__)
+        free(co->stack_mem);
+#else
         munmap(co->stack_mem, co->stack_total);
+#endif
     }
     free(co);
 }

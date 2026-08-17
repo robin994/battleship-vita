@@ -1,12 +1,12 @@
 [submodule "libultraship"]
 	path = libultraship
-	url = https://github.com/JRickey/libultraship.git
-	branch = ssb64
+	url = https://github.com/robin994/libultraship-vita.git
+	branch = vita-rinne-merge
 [submodule "torch"]
 	path = torch
 	url = https://github.com/JRickey/Torch.git
 	branch = ssb64
 [submodule "decomp"]
 	path = decomp
-	url = https://github.com/JRickey/ssb-decomp-re.git
-	branch = port-patches
+	url = https://github.com/robin994/ssb-decomp-re-vita.git
+	branch = vita-compat-fixes

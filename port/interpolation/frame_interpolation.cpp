@@ -74,8 +74,8 @@ std::vector<SnapEntry> sCur;
 std::vector<SnapEntry> sPrev;
 std::unordered_map<uint64_t, uint32_t> sPrevIndex;
 std::vector<PairEntry> sPairs;
-std::unordered_map<Mtx *, MtxF> sReplacements;
-const std::unordered_map<Mtx *, MtxF> sEmptyReplacements;
+robin_hood::unordered_map<Mtx *, MtxF> sReplacements;
+const robin_hood::unordered_map<Mtx *, MtxF> sEmptyReplacements;
 
 bool sConfigInited = false;
 int sConfigK = 1;       /* k requested by CVar/env */
@@ -336,7 +336,7 @@ extern "C" void portInterpBeginDraw(void)
     }
 }
 
-const std::unordered_map<Mtx *, MtxF> &portInterpGetReplacements(int subframe, int total)
+const robin_hood::unordered_map<Mtx *, MtxF> &portInterpGetReplacements(int subframe, int total)
 {
     if (subframe >= total || sPairs.empty()) {
         return sEmptyReplacements;

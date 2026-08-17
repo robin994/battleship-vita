@@ -1,0 +1,300 @@
+TARGET := BattleShip
+
+TITLE := SSB64VITA
+
+TORCH_INCLUDES := torch/src torch/src/utils torch/lib torch torch/src/factories \
+	torch/lib/n64graphics torch/lib/binarytools libgfxd
+
+# libgfxd (glankk/libgfxd, vendored - not a CMake project, so torch/CMakeLists.txt
+# FetchContent's the source directly). Only these 6 files are compiled; the
+# rest (uc.c, uc_argfn.c, uc_argtbl.c, uc_macrofn.c, uc_macrotbl.c) are pulled
+# in via #include from within them, so they must NOT also be globbed as
+# separate translation units (duplicate-symbol risk).
+GFXD_SOURCES := libgfxd/gfxd.c libgfxd/uc_f3d.c libgfxd/uc_f3db.c libgfxd/uc_f3dex.c \
+	libgfxd/uc_f3dexb.c libgfxd/uc_f3dex2.c
+
+# torch/src/factories/ssb64 (RelocFactory) + naudio v0/v1 are this game's
+# Torch factories, gated by -DNAUDIO_SUPPORT/-DSSB64_SUPPORT below (matches
+# CMakeLists.txt's BUILD_NAUDIO=ON/BUILD_SSB64=ON, all other BUILD_* OFF).
+TORCH_SOURCES := torch/src torch/src/factories torch/src/factories/sm64 torch/lib/binarytools \
+	torch/src/n64 torch/src/preprocess torch/src/types torch/src/utils torch/lib/libmio0 \
+	torch/src/archive torch/lib/libyay0 torch/lib/n64graphics torch/lib/libvpk0 \
+	torch/src/factories/naudio/v0 torch/src/factories/naudio/v1 torch/src/factories/ssb64 \
+	torch/src/factories/sm64/geo torch/src/factories/sm64/behavior torch/src/factories/sm64/macro \
+	torch/src/factories/sm64/level torch/src/factories/sm64/collision
+
+LUS_INCLUDES := libultraship/include libultraship/src libultraship/src/ship/utils/binarytools libultraship/src/resource/type \
+	libultraship/src/resource libultraship/src/window libultraship/src/window/gui libultraship/src/audio libultraship/src/graphic \
+	libultraship/src imgui imgui/backends libultraship/src/public/bridge libultraship/include/libultraship \
+	libultraship/src/resource/factory libultraship/src/libultraship libultraship/src/libultraship/bridge \
+	libultraship/src/libultraship/libultra vendor/hidapi_stub
+
+# libultraship/src/libultraship/* (NOT src/ship/*, a separate parallel tree -
+# CMakeLists.txt's src/libultraship/CMakeLists.txt add_subdirectory) provides
+# the actual libultra OS-compat layer (osGetCount/osGetTime/cache ops in
+# libultra/, GfxSetNativeDimensions in bridge/gfxbridge.cpp) that decomp/src
+# calls into. port/stubs/n64_stubs.c covers message queues; this covers the
+# rest - both are needed, they don't overlap.
+LUS_SOURCES := libultraship/src/fast libultraship/src/fast/resource/type libultraship/src/fast/resource/factory libultraship/src/ship/resource/factory \
+	libultraship/src/fast/postprocess \
+	libultraship/src/fast/debug libultraship/src/fast/backends libultraship/src/ship libultraship/src/ship/audio libultraship/src/ship/resource/type \
+	libultraship/src/ship/config libultraship/src/ship/controller/controldeck libultraship/src/ship/controller/controldevice libultraship/src/ship/utils \
+	libultraship/src/ship/controller/controldevice/controller libultraship/src/ship/controller/controldevice/controller/mapping libultraship/src/ship/window \
+	libultraship/src/ship/controller/controldevice/controller/mapping/factories libultraship/src/ship/controller/controldevice/controller/mapping/keyboard \
+	libultraship/src/ship/controller/controldevice/controller/mapping/mouse libultraship/src/ship/controller/controldevice/controller/mapping/sdl \
+	libultraship/src/ship/controller/physicaldevice libultraship/src/ship/debug libultraship/src/ship/resource libultraship/src/ship/resource/archive \
+	libultraship/src/ship/utils/binarytools libultraship/src/ship/window/gui libultraship/src/ship/window/gui/resource \
+	libultraship/src/ship/events \
+	libultraship/src/libultraship/bridge libultraship/src/libultraship/libultra libultraship/src/libultraship/log \
+	libultraship/src/libultraship/window/gui libultraship/src/libultraship/controller/controldeck \
+	libultraship/src/libultraship/controller/controldevice/controller \
+	libultraship/src/libultraship/controller/controldevice/controller/mapping \
+	libultraship/src/ship/controller/raphnet libultraship/src/ship/controller/controldevice/controller/mapping/raphnet
+
+# raphnet N64-USB-adapter support is compiled as real upstream source (not
+# stubbed) against vendor/hidapi_stub - Vita has no generic USB HID host
+# passthrough for third-party adapters, so the stub always reports zero
+# devices; RaphnetPhysicalDeviceManager::Init() then just claims 0 ports and
+# the normal SDL/keyboard path handles input, same as a desktop machine with
+# no adapter plugged in. Cheaper and more faithful than reimplementing the
+# C++ manager/mapping classes by hand.
+
+# BattleShip's own C++ port layer (Ship::Context, resource factories/bridges,
+# enhancements, widescreen, frame interpolation). Vita additions land here or
+# in a new port/vita/ subdirectory once the rendering-backend work starts.
+# decomp/include (the decomp's C-only stdlib/stddef/stdio shims) is
+# deliberately NOT here - see the CPPFLAGS override below. Per
+# CMakeLists.txt's own split (ssb64_game vs the main port target), those
+# shims shadow the real C++ standard library and must stay scoped to
+# decomp/src's own .c files only.
+GAME_INCLUDES := . include decomp/src port port/audio port/bridge port/enhancements \
+	port/gui port/resource port/widescreen port/interpolation port/hooks port/css_icons debug_tools \
+	spdlog/include toml/include/toml++ vendor vendor/BS_thread_pool
+
+# port/stubs (n64_stubs.c: osSendMesg/osRecvMesg/osCreateMesgQueue/etc PC-side
+# implementations + gspF3DEX2_fifo*Start placeholder data) is compiled as
+# part of the decomp scope per CMakeLists.txt (SSB64_STUBS glob, explicitly
+# excluded from the main port target's glob to avoid double-compiling it).
+#
+# ft/gr/it/mn/mv/sc/wp are organized in deep per-character/per-stage
+# subdirectories (e.g. decomp/src/ft/ftchar/ftmario/); a flat, non-recursive
+# per-directory glob (like the rest of this Makefile uses) silently misses
+# all of it. find them recursively instead of hand-listing every subdir.
+DECOMP_NESTED_DIRS := $(shell find decomp/src/ft decomp/src/gr decomp/src/it decomp/src/mn decomp/src/mv decomp/src/sc decomp/src/wp -type d)
+
+GAME_SOURCES := decomp/src/credits decomp/src/ef decomp/src/gm $(DECOMP_NESTED_DIRS) decomp/src/if \
+	decomp/src/lb decomp/src/mp decomp/src/sys \
+	decomp/src/libultra/gu decomp/src/libultra/n_audio decomp/src/libultra/audio \
+	port port/audio port/bridge port/enhancements port/gui port/resource port/widescreen port/interpolation port/hooks \
+	port/stubs port/css_icons debug_tools/gbi_trace debug_tools/acmd_trace
+
+SOURCES := $(LUS_SOURCES) $(TORCH_SOURCES) $(GAME_SOURCES)
+
+INCLUDES := $(LUS_INCLUDES) $(TORCH_INCLUDES) $(GAME_INCLUDES)
+
+# Vita-specific stack: vitaGL is the Fast3D render target, vitashark +
+# SceShaccCgExt handle runtime shader compilation (no native GLSL compiler on
+# device), mathneon is the standard NEON math lib for real-time 3D VitaSDK
+# homebrew. Same core set as every other libultraship/Shipwright Vita port
+# (Ghostship, SpaghettiKart, 2ship2harkinian).
+#
+# vitaGL-nosplash instead of VitaSDK's stock libvitaGL.a: skips the vitaGL
+# boot splashscreen. Unlike NeoVitaDB-Downloader (whose codebase predates
+# vglDrawObjects' current 2-arg signature and doesn't render with this
+# variant), gfx_opengl.cpp here never calls vglDrawObjects directly and
+# both headers already agree on the 2-arg signature, so the API-mismatch
+# regression documented for that project doesn't apply. Still unverified
+# on real Vita hardware for BattleShip specifically - revert to the
+# stock -L path (drop this line) if rendering breaks.
+VITAGL_NOSPLASH_DIR := /Users/robin994/.local/opt/vitadb-deps/vitaGL-nosplash
+
+LIBS = -L$(VITAGL_NOSPLASH_DIR) -lzip -lbz2 -lzstd -lz -lyaml-cpp -llzma -lssl -lcrypto -lstdc++ -lpng \
+	-Wl,--whole-archive -lpthread -Wl,--no-whole-archive \
+	-ltinyxml2 -lSDL2 -lvorbisfile -lvorbis -logg -lvitaGL -lvitashark -lSceShaccCgExt -ltaihen_stub -lmathneon -lSceAudioIn_stub \
+	-lSceIme_stub -lSceKernelDmacMgr_stub -lSceGxm_stub -lSceDisplay_stub -lSceTouch_stub -lSceHid_stub -lSceCtrl_stub -lSceNet_stub \
+	-lSceNetCtl_stub -lSceCommonDialog_stub -lSceAudio_stub -lSceSysmodule_stub -lSceMotion_stub -lSceAppUtil_stub \
+	-lSceAppMgr_stub -lSceShaccCg_stub -lScePower_stub
+
+FINAL_SOURCES := build/f
+
+CFILES := $(foreach dir,$(SOURCES), $(wildcard $(dir)/*.c)) $(GFXD_SOURCES) vendor/hidapi_stub/hidapi_stub.c
+CPPFILES := $(foreach dir,$(SOURCES), $(wildcard $(dir)/*.cpp)) \
+	imgui/imgui.cpp imgui/imgui_demo.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp \
+	imgui/backends/imgui_impl_opengl3.cpp imgui/backends/imgui_impl_sdl2.cpp \
+	port/port_watchdog_vita.cpp port/renderdoc_trigger_vita.cpp port/enhancements_vita_stubs.cpp
+
+# Excluded per docs/architecture.md "What NOT to Include in Port":
+# decomp/src/ovl8, decomp/src/db (debug overlay), asm/, ROM/copyrighted data.
+# decomp/src/db and relocData are not in GAME_SOURCES above so nothing to
+# filter here yet; add filters if new source dirs pull in excluded files.
+CFILES := $(filter-out %.inc.c, $(CFILES))
+
+# libultraship/src/fast/backends/ is globbed as one directory upstream (it
+# has no per-platform subfolders), so the Windows/Mac-only renderer backends
+# come along for free and need filtering out here.
+# gfx_opengl.cpp is excluded too: upstream's copy depends on prism/processor.h,
+# a header that only exists in Rinnegatamante's own Vita-patched libultraship
+# fork (confirmed by him directly - his gfx_opengl.cpp drops Prism entirely).
+# Compiling without it just defers the missing renderer to link time; it needs
+# his actual fork, not a reimplementation from the generic backend.
+#
+# coroutine_posix.cpp/coroutine_win32.cpp/coroutine_test.cpp: other platforms'
+# coroutine backends (Vita uses coroutine_android.cpp, extended to also cover
+# __vita__ - it's already a bare AAPCS32 asm context switch, the right fit for
+# a console with no ucontext.h). port_watchdog.cpp needs the same POSIX
+# ucontext signal API; port_watchdog_vita.cpp above is its no-op Vita stub.
+# Updater/DiscordRichPresence/ShaderDownloader/port_window_icon: excluded the
+# same way upstream already excludes them for Android (CMakeLists.txt's
+# CMAKE_SYSTEM_NAME STREQUAL "Android" block) - no curl self-updater, no
+# discord-rpc link, no libretro shader downloader, no CMake-generated icon
+# header on a hand-rolled Makefile build.
+# gfx_opengl.cpp is no longer excluded: it's now Rinnegatamante's own
+# Vita-patched version (merged from Ghostship, see libultraship's
+# "Merge Rinnegatamante's Vita-patched rendering layer" commit) - drops the
+# prism/processor.h dependency that blocked the generic upstream version.
+# Fast3dGui.cpp is excluded: pulled in incidentally by that merge (a
+# modify/delete conflict resolved by taking his side) but nothing in the
+# actual Vita rendering path (gfx_opengl.cpp/Fast3dWindow.cpp/interpreter.cpp)
+# references it - confirmed via grep, not load-bearing.
+# RelocFileTable.us.cpp and RelocFileTable.jp.cpp both define the global
+# gRelocFileTable[]/RELOC_FILE_COUNT symbols (CMakeLists.txt excludes both
+# from its glob and adds back only the one matching SSB64_VERSION - see its
+# "both define gRelocFileTable — compile only the [selected version]"
+# comment). This Makefile is hardcoded to REGION_US, so only .us.cpp is
+# correct here; without this exclusion both got linked, and
+# -Wl,-q,--allow-multiple-definition silently let the .jp.cpp definition
+# win over .us.cpp instead of failing the build - RELOC_FILE_COUNT stayed
+# the US value (2132, a compile-time constant baked into every other
+# translation unit) but the actual backing array only had the JP release's
+# 2107 real entries, so every reloc file_id >= 2107 read past the end of
+# that array into zeroed memory and came back NULL.
+CPPFILES := $(filter-out %/gfx_direct3d11.cpp %/gfx_direct3d_common.cpp %/gfx_dxgi.cpp %/gfx_metal.cpp %/gfx_metal_shader.cpp %/Fast3dGui.cpp \
+	%/coroutine_posix.cpp %/coroutine_win32.cpp %/coroutine_test.cpp %/port_watchdog.cpp \
+	%/Updater.cpp %/DiscordRichPresence.cpp %/ShaderDownloader.cpp %/port_window_icon.cpp \
+	%/renderdoc_trigger.cpp %/RelocFileTable.jp.cpp, $(CPPFILES))
+
+# ARM AAPCS32 coroutine context-switch shim (matches coroutine_android.cpp's
+# CoroCtx layout for __arm__). Vita is armv7 (Cortex-A9), same ABI as
+# armeabi-v7a Android, so this file needs no changes.
+SFILES := port/coroutine_armv7.S
+
+# decomp/include is scoped to decomp/src's own object files only (matches
+# CMakeLists.txt's ssb64_game vs. main-target include split - see the
+# GAME_INCLUDES comment above). CPPFLAGS is picked up by both the C and C++
+# implicit compile rules. The -Wno-* flags mirror CMakeLists.txt's own
+# ssb64_game target options: the decomp was written against IDO 7.1 and
+# relies on implicit-int returns, pointer-sign mismatches, etc. that IDO
+# only warned about - scoped to decomp/src only, same as the include path.
+decomp/src/%.o: CPPFLAGS := -Idecomp/include -Wno-implicit-int -Wno-shift-negative-value \
+	-Wno-parentheses-equality -Wno-pointer-sign -Wno-unused-value -Wno-unused-variable \
+	-Wno-unused-but-set-variable -Wno-unused-function
+# port/stubs is compiled alongside decomp/src (see GAME_SOURCES) and needs
+# the same decomp/include shims (ssb_types.h, PR/os.h, ...).
+port/stubs/%.o: CPPFLAGS := -Idecomp/include -Wno-implicit-int -Wno-shift-negative-value \
+	-Wno-parentheses-equality -Wno-pointer-sign -Wno-unused-value -Wno-unused-variable \
+	-Wno-unused-but-set-variable -Wno-unused-function
+
+# libgfxd calls some functions before their declaration (old C style); GCC
+# 14+ made -Wimplicit-function-declaration a hard error by default regardless
+# of -std=, so this vendored third-party library needs it downgraded.
+# -UF3DEX_GBI_2: each of libgfxd's 6 uc_*.c files self-selects ITS OWN
+# microcode variant internally (e.g. uc_f3d.c does '#define F3D_GBI' before
+# '#include "uc.c"'). Our global -DF3DEX_GBI_2=1 (needed by the decomp's own
+# game code) leaks in via CFLAGS and collides with that self-selection,
+# making both G_MW_POINTS (F3D_GBI) and G_MW_FORCEMTX (F3DEX_GBI_2) visible
+# at once in the same switch - both are microcode-index 12, so that's a
+# duplicate case value. Undefining it here lets each file's own #define win.
+libgfxd/%.o: CPPFLAGS := -Wno-implicit-function-declaration -UF3DEX_GBI_2
+
+OBJS := $(CFILES:.c=.o) $(CPPFILES:.cpp=.o) $(SFILES:.S=.o)
+
+OBJS_PREPARE := $(CFILES:.c=.ok) $(CPPFILES:.cpp=.ok) $(SFILES:.S=.ok)
+
+OBJS_CLEAN := $(CFILES:.c=.oc) $(CPPFILES:.cpp=.oc) $(SFILES:.S=.oc)
+
+FINAL_OBJS := $(foreach dir,$(FINAL_SOURCES), $(wildcard $(dir)/*.o))
+
+PREFIX = arm-vita-eabi
+CC  = $(PREFIX)-gcc
+CXX = $(PREFIX)-g++
+
+CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-short-enums -fsigned-char \
+	-I$(VITAGL_NOSPLASH_DIR)/source \
+	$(foreach dir,$(INCLUDES),-I$(dir)) -fno-strict-aliasing -DMA_NO_RUNTIME_LINKING \
+	-Wno-narrowing -DIMGUI_IMPL_OPENGL_ES2 -DSPDLOG_ACTIVE_LEVEL=6 -DFMT_HEADER_ONLY \
+	-I$(VITASDK)/$(PREFIX)/include/SDL2 -DENABLE_OPENGL=1 \
+	-D_LANGUAGE_C -DCIMGUI_DEFINE_ENUMS_AND_STRUCTS \
+	-DAVOID_UB=1 -DF3DEX_GBI_2=1 -DNON_MATCHING=1 -DNON_EQUIVALENT=1 -DPORT=1 -DN_MICRO=1 \
+	-D_USE_MATH_DEFINES -DVERSION_US=1 -DREGION_US=1 -DDISABLE_SCRIPTING=1 \
+	-DSSB64_APP_NAME=\"BattleShip\" -DSSB64_O2R_NAME=\"BattleShip.o2r\" \
+	-DBATTLESHIP_CURRENT_VERSION=\"1.0.0-vita\" -DSSB64_ASSET_RECIPE_HASH=\"vita-manual-build\" \
+	-DCVAR_VSYNC_ENABLED=\"gVsyncEnabled\" -DCVAR_Z_FIGHTING_MODE=\"gZFightingMode\" \
+	-DCVAR_INTERNAL_RESOLUTION=\"gInternalResolution\" -DCVAR_MSAA_VALUE=\"gMSAAValue\" \
+	-DCVAR_SDL_WINDOWED_FULLSCREEN=\"gSdlWindowedFullscreen\" -DCVAR_TEXTURE_FILTER=\"gTextureFilter\" \
+	-DCVAR_IMGUI_CONTROLLER_NAV=\"gControlNav\" -DCVAR_CONSOLE_WINDOW_OPEN=\"gConsoleEnabled\" \
+	-DCVAR_CONTROLLER_CONFIGURATION_WINDOW_OPEN=\"gControllerConfigurationEnabled\" \
+	-DCVAR_CONTROLLER_DISCONNECTED_WINDOW_OPEN=\"gControllerDisconnectedWindowEnabled\" \
+	-DCVAR_CONTROLLER_REORDERING_WINDOW_OPEN=\"gControllerReorderingWindowEnabled\" \
+	-DCVAR_GFX_DEBUGGER_WINDOW_OPEN=\"gGfxDebuggerEnabled\" -DCVAR_STATS_WINDOW_OPEN=\"gStatsEnabled\" \
+	-DCVAR_ENABLE_MULTI_VIEWPORTS=\"gEnableMultiViewports\" -DCVAR_LOW_RES_MODE=\"gLowResMode\" \
+	-DCVAR_SIMULATED_INPUT_LAG=\"gSimulatedInputLag\" -DCVAR_GAME_OVERLAY_FONT=\"gOverlayFont\" \
+	-DCVAR_MENU_BAR_OPEN=\"gOpenMenuBar\" -DCVAR_PREFIX_CONTROLLERS=\"gControllers\" \
+	-DCVAR_PREFIX_ADVANCED_RESOLUTION=\"gAdvancedResolution\" -DCVAR_AUDIO_CHANNELS_SETTING=\"gAudioChannelsSetting\" \
+	-DCVAR_ALLOW_BACKGROUND_INPUTS=\"gAllowBackgroundInputs\" -DCVAR_POSTPROCESS_ENABLED=\"gPostProcessEnabled\" \
+	-DCVAR_POSTPROCESS_SHADER=\"gPostProcessShader\" \
+	-DNAUDIO_SUPPORT -DSSB64_SUPPORT -DIMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS
+
+CXXFLAGS = $(CFLAGS) -fexceptions -std=gnu++20 -fpermissive
+ASFLAGS  = $(CFLAGS)
+
+all: build/battleship.vpk
+
+build/battleship.vpk: build/battleship.velf build/f3d.o2r
+	vita-make-fself -c -s $< build/eboot.bin
+	vita-mksfoex -s TITLE_ID=$(TITLE) -d ATTRIBUTE2=12 "$(TARGET)" build/param.sfo
+	vita-pack-vpk -s build/param.sfo -b build/eboot.bin build/battleship.vpk \
+		-a livearea/icon0.png=sce_sys/icon0.png \
+		-a livearea/bg.png=sce_sys/livearea/contents/bg.png \
+		-a livearea/startup.png=sce_sys/livearea/contents/startup.png \
+		-a livearea/template.xml=sce_sys/livearea/contents/template.xml \
+		-a build/f3d.o2r=f3d.o2r
+
+# Fast3D shader archive PortLocateFile("f3d.o2r") needs at boot, before the
+# main game archive is even found — mirrors CMakeLists.txt's GenerateF3DO2R
+# target (zip of libultraship/src/fast/shaders as a zip-format o2r). Bundled
+# at the VPK root (not sce_sys) so it lands at app0:/f3d.o2r, matching the
+# "./f3d.o2r" fallback PortLocateFile resolves to when neither ux0:data nor
+# the bundle dir have it. Without this, ResourceManager::Init() gets an
+# archive path that fails to load; IsLoaded() is false so the thread pool is
+# paused forever (see ResourceManager::Init's comment) and the first real
+# resource load after that hangs the main thread indefinitely.
+build/f3d.o2r: $(wildcard libultraship/src/fast/shaders/*/*)
+	@mkdir -p build
+	rm -f $@
+	cd libultraship/src/fast && zip -r -X -q $(CURDIR)/$@ shaders
+
+prepare: build/f $(OBJS_PREPARE)
+
+build/f:
+	mkdir -p build/f
+
+%.ok:
+	$(eval gen_num=$(shell echo $$(($(gen_num)+1))))
+	@cp $(@:k=) build/f/$(gen_num).o
+
+%.oc:
+	@rm -rf $(@:c=)
+
+%.velf: %.elf
+	cp $< $<.unstripped.elf
+	$(PREFIX)-strip -g $<
+	vita-elf-create $< $@
+
+build/battleship.elf: $(FINAL_OBJS)
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) $^ $(LIBS) -o $@
+
+objects: $(OBJS)
+
+clean: $(OBJS_CLEAN)
+	@rm -rf build/battleship.velf build/battleship.elf build/battleship.elf.unstripped.elf $(FINAL_OBJS) build/eboot.bin build/battleship.vpk build/param.sfo

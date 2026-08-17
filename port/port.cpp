@@ -13,6 +13,7 @@
 #include <libultraship/controller/controldeck/ControlDeck.h>
 #include <fast/Fast3dWindow.h>
 #include <ship/resource/File.h>
+#include <imgui.h>
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -925,6 +926,29 @@ static int PortInitImpl(int argc, char* argv[]) {
 	// polled and used to fill the ROM path field.
 	if (!sContext->InitFileDropMgr()) { port_log("SSB64: InitFileDropMgr failed\n"); return 1; }
 	port_log("SSB64: FileDropMgr OK\n");
+
+	// Archive loading just below (and asset extraction, if it runs) can take
+	// a real, perceptible amount of time on slow removable media - draw a
+	// couple of frames with a status line first so it's a "loading" screen
+	// instead of a black one that looks frozen.
+	if (auto window = sContext->GetWindow()) {
+		if (auto gui = window->GetGui()) {
+			for (int i = 0; i < 2; i++) {
+				window->HandleEvents();
+				gui->StartDraw();
+				window->StartFrame();
+				ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+				ImGui::Begin("##boot_status", nullptr,
+				             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+				                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
+				ImGui::Text("Loading BattleShip assets...");
+				ImGui::End();
+				window->RunGuiOnly();
+				gui->EndDraw();
+				window->EndFrame();
+			}
+		}
+	}
 
 	/* First-run flow:
 	 *   1. Silent extraction: if a ROM sits at app-data / bundle / cwd we

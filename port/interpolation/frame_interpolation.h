@@ -75,6 +75,7 @@ void portInterpApplyConfig(void);
 
 #include <unordered_map>
 #include <fast/types.h>
+#include <robin_hood.h>
 
 /**
  * Replacement map for subframe j of `total` (1-based). Returns a reference to
@@ -82,6 +83,6 @@ void portInterpApplyConfig(void);
  * fraction j/total; the last subframe returns an empty map (render from game
  * memory, bit-exact). Valid until the next portInterpBeginDraw/EndDraw.
  */
-const std::unordered_map<Mtx *, MtxF> &portInterpGetReplacements(int subframe, int total);
+const robin_hood::unordered_map<Mtx *, MtxF> &portInterpGetReplacements(int subframe, int total);
 
 #endif /* __cplusplus */

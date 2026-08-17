@@ -47,6 +47,27 @@ namespace ssb64 {
 
 namespace {
 
+// fs::absolute() assumes a POSIX-rooted ('/') or (on Windows) drive-lettered
+// path; it doesn't recognize Vita's "device0:"-prefixed scheme (ux0:, app0:,
+// ...) as already absolute, and instead resolves it against the process cwd
+// - producing a garbled path like "app0:/ux0:data/battleship/..." that later
+// throws filesystem_error when probed. Paths built from
+// GetAppDirectoryPath()/GetPathRelativeToAppDirectory() are already fully
+// qualified on Vita, so skip resolution for anything that looks
+// device-prefixed (a colon before the first slash).
+fs::path ResolveAbsolute(const fs::path& p, std::error_code& ec) {
+    ec.clear();
+#ifdef __vita__
+    const std::string s = p.string();
+    const auto colon = s.find(':');
+    const auto slash = s.find('/');
+    if (colon != std::string::npos && (slash == std::string::npos || colon < slash)) {
+        return p;
+    }
+#endif
+    return fs::absolute(p, ec);
+}
+
 /* Asset-recipe fingerprint baked in by CMake (torch submodule SHA +
  * config.yml + yamls/<region> hashes). A BattleShip.o2r extracted by a
  * different pipeline version is format-incompatible with this binary —
@@ -81,8 +102,9 @@ void WriteRecipeSidecar(const fs::path& o2rPath) {
 
 // Search candidates in order; return the first that exists.
 std::string FindExisting(const std::vector<std::string>& candidates) {
+    std::error_code ec;
     for (const auto& c : candidates) {
-        if (!c.empty() && fs::exists(c)) {
+        if (!c.empty() && fs::exists(c, ec)) {
             return c;
         }
     }
@@ -111,7 +133,7 @@ std::string TryOpenLogPath(const fs::path& candidate) {
     // with exit 1 before torch runs. GetPathRelativeToAppDirectory()
     // returns "./logs/…" on macOS in portable mode, which is what
     // tripped this.
-    fs::path absolute = fs::absolute(candidate, ec);
+    fs::path absolute = ResolveAbsolute(candidate, ec);
     if (ec || absolute.empty()) {
         return candidate.string();
     }
@@ -215,7 +237,7 @@ std::string FindTorchExecutable() {
     // sh aborts with exit 127 (32512 from std::system) before torch
     // runs.
     std::error_code ec;
-    fs::path absolute = fs::absolute(fs::path(found), ec);
+    fs::path absolute = ResolveAbsolute(fs::path(found), ec);
     if (ec || absolute.empty()) {
         return found;
     }
@@ -302,10 +324,11 @@ std::string FindAssetConfigDir() {
         fs::current_path(),
     };
 
+    std::error_code ec;
     for (const auto& root : roots) {
         fs::path dir = root;
         while (!dir.empty()) {
-            if (fs::exists(dir / "config.yml") && fs::exists(dir / "yamls" / kRegion)) {
+            if (fs::exists(dir / "config.yml", ec) && fs::exists(dir / "yamls" / kRegion, ec)) {
                 return dir.string();
             }
 
@@ -336,7 +359,7 @@ std::string FindBaseRom() {
     }
 
     std::error_code ec;
-    const fs::path absolute = fs::absolute(fs::path(found), ec);
+    const fs::path absolute = ResolveAbsolute(fs::path(found), ec);
     if (!ec) {
         return absolute.string();
     }
@@ -363,10 +386,10 @@ void DrawWizardFrame(const std::function<void()>& drawContents) {
 ExtractionResult ExtractAssetsIfNeeded(const std::string& target_o2r_path, bool silent,
                                        const std::string& romOverridePath) {
     std::error_code ec;
-    const fs::path absoluteTargetPath = fs::absolute(fs::path(target_o2r_path), ec);
+    const fs::path absoluteTargetPath = ResolveAbsolute(fs::path(target_o2r_path), ec);
     const fs::path targetPath = ec ? fs::path(target_o2r_path) : absoluteTargetPath;
     bool staleRecipe = false;
-    if (fs::exists(targetPath)) {
+    if (fs::exists(targetPath, ec)) {
 #if defined(__ANDROID__)
         /* Android extraction goes through the Java RomImporter flow (which
          * has its own asset sentinel) and the staged ROM is deleted after
@@ -399,6 +422,14 @@ ExtractionResult ExtractAssetsIfNeeded(const std::string& target_o2r_path, bool 
             port_log("first_run: no ROM available for recipe re-extraction; "
                      "continuing with the existing (possibly stale) %s\n",
                      SSB64_O2R_NAME);
+            /* Nothing this run could do differently next time without a ROM
+             * either — write the sidecar so future boots see a matching
+             * recipe and skip straight past this whole check instead of
+             * re-logging the same "stale"/"no ROM" pair forever. A manually
+             * dropped archive (e.g. extracted via standalone Torch, never
+             * touching WriteRecipeSidecar()) hits this every single boot
+             * otherwise. */
+            WriteRecipeSidecar(targetPath);
             return { true, targetPath.string(), {}, {} };
         }
         const std::string appData = Ship::Context::GetAppDirectoryPath();
@@ -417,7 +448,7 @@ ExtractionResult ExtractAssetsIfNeeded(const std::string& target_o2r_path, bool 
     }
 
     ec.clear();
-    const fs::path absoluteRomPath = fs::absolute(fs::path(rom), ec);
+    const fs::path absoluteRomPath = ResolveAbsolute(fs::path(rom), ec);
     if (!ec) {
         rom = absoluteRomPath.string();
     }
@@ -438,7 +469,10 @@ ExtractionResult ExtractAssetsIfNeeded(const std::string& target_o2r_path, bool 
     port_log("first_run: torch executable -> %s\n", torchExe.c_str());
 
     fs::create_directories(targetPath.parent_path());
-    const fs::path workDir = fs::absolute(targetPath.parent_path() / "torch-work");
+    ec.clear();
+    const fs::path resolvedWorkDir = ResolveAbsolute(targetPath.parent_path() / "torch-work", ec);
+    const fs::path workDir = ec ? (targetPath.parent_path() / "torch-work") : resolvedWorkDir;
+    ec.clear();
     fs::remove_all(workDir, ec);
     ec.clear();
     fs::create_directories(workDir, ec);
@@ -503,7 +537,8 @@ ExtractionResult ExtractAssetsIfNeeded(const std::string& target_o2r_path, bool 
     // Torch emits with the historical "BattleShip.o2r" name; the port
     // renames into the per-region SSB64_O2R_NAME below.
     const std::string emitted = (workDir / "BattleShip.o2r").string();
-    if (!fs::exists(emitted)) {
+    ec.clear();
+    if (!fs::exists(emitted, ec)) {
         port_log("first_run: ERROR extractor reported success but %s is missing\n",
                  emitted.c_str());
         if (staleRecipe) {
@@ -689,7 +724,8 @@ bool RunFirstRunWizard(const std::string& target_o2r_path) {
                 ImGui::BeginDisabled(busy);
 
                 if (ImGui::Button("Extract", ImVec2(120, 0))) {
-                    if (!fs::exists(romPath)) {
+                    std::error_code romExistsEc;
+                    if (!fs::exists(romPath, romExistsEc)) {
                         statusMsg = "ROM not found at that path.";
                     } else {
                         state = State::Extracting;
