@@ -193,7 +193,11 @@ void osStartThread(OSThread *t)
 	/* Create the coroutine lazily on first start. */
 	if (t->port_coroutine == NULL && t->port_entry != NULL) {
 		size_t stack_size = (t->id < 100) ? PORT_STACK_SERVICE : PORT_STACK_GOBJ;
+		port_log("SSB64: DIAG osStartThread id=%d before port_coroutine_create (stack_size=%u)\n",
+		         (int)t->id, (unsigned)stack_size);
 		t->port_coroutine = port_coroutine_create(t->port_entry, t->port_arg, stack_size);
+		port_log("SSB64: DIAG osStartThread id=%d after port_coroutine_create coroutine=%p\n",
+		         (int)t->id, t->port_coroutine);
 		if (t->port_coroutine == NULL) {
 			port_log( "SSB64: failed to create coroutine for thread %d\n", (int)t->id);
 			return;
@@ -204,7 +208,9 @@ void osStartThread(OSThread *t)
 	 * osRecvMesg BLOCK or osStopThread) then return here. */
 	if (t->port_coroutine != NULL) {
 		t->state = OS_STATE_RUNNING;
+		port_log("SSB64: DIAG osStartThread id=%d before port_coroutine_resume\n", (int)t->id);
 		port_coroutine_resume((PortCoroutine *)t->port_coroutine);
+		port_log("SSB64: DIAG osStartThread id=%d after port_coroutine_resume\n", (int)t->id);
 		if (port_coroutine_is_finished((PortCoroutine *)t->port_coroutine)) {
 			t->state = OS_STATE_STOPPED;
 		} else {

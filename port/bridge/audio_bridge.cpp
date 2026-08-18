@@ -555,6 +555,28 @@ extern "C" void portAudioLoadAssets(void)
 {
     spdlog::info("audio_bridge: loading audio assets from .o2r");
 
+    /* sSYAudioCurrentSettings is a plain global with no initializer, so it
+     * starts zeroed - heap_base=NULL, heap_size=0 among everything else.
+     * In the original decomp (decomp/src/sys/audio.c), the copy from
+     * dSYAudioPublicSettings (which does have real values, including
+     * heap_base=gSYAudioHeapBuffer and heap_size=ARRAY_COUNT(...)) only
+     * happens inside the N64 audio thread's own settings-update message
+     * handling (see the several `sSYAudioCurrentSettings =
+     * dSYAudioPublicSettings` sites in that file) - this port bypasses
+     * that thread's boot sequence entirely and calls straight into this
+     * function, so that copy never ran. The result: alHeapInit() below
+     * was handed a NULL base and zero size, leaving sSYAudioHeap's
+     * allocator permanently broken; every alHeapAlloc() call throughout
+     * this function and the rest of the audio pipeline (BankParser,
+     * parseSeqFile, sequence/ACMD/output buffers) was allocating from that
+     * broken state, producing wild pointers that corrupted unrelated heap
+     * memory - manifesting on real hardware as a real-but-unrelated-looking
+     * crash deep inside zlib while decompressing the very next resource
+     * (audio/B1_sounds1_ctl) to be loaded, not inside the audio code
+     * itself. Do the same copy here, once, before anything reads these
+     * settings. */
+    sSYAudioCurrentSettings = dSYAudioPublicSettings;
+
     // Initialize heap
     memset(sSYAudioCurrentSettings.heap_base, 0, sSYAudioCurrentSettings.heap_size);
     alHeapInit(&sSYAudioHeap, sSYAudioCurrentSettings.heap_base,

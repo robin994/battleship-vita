@@ -24,6 +24,11 @@
 #include <typeinfo>
 #include <unordered_set>
 
+#ifdef __vita__
+#include <malloc.h>
+#include <unistd.h>
+#endif
+
 #include "resource/ResourceType.h"
 #include "resource/RelocFileFactory.h"
 #include <ship/resource/factory/BlobFactory.h>
@@ -57,6 +62,10 @@
 #ifndef DISABLE_SCRIPTING
 #include <ship/scripting/ScriptLoader.h>
 #include <libultraship/bridge/scriptingbridge.h>
+#endif
+
+#ifdef __vita__
+#include <psp2/kernel/threadmgr.h>
 #endif
 
 extern "C" void PortRegisterEvents(void);
@@ -678,13 +687,21 @@ static int PortInitImpl(int argc, char* argv[]) {
 
 	port_log("SSB64: Context instance created\n");
 
-	/* TEMPORARY DIAGNOSTIC (revert after use): InitLogging()'s default
-	 * releaseBuildLogLevel is spdlog::level::warn (Context.h), which was
-	 * silently filtering out every ResourceManager/ArchiveManager INFO log
-	 * before it ever reached a sink - independent of the flush_on policy.
-	 * That's why BattleShip.log stayed at 0 bytes even after switching
-	 * flush_on to info. Passing info here lets those logs through. */
-	if (!sContext->InitLogging(spdlog::level::debug, spdlog::level::info)) { port_log("SSB64: InitLogging failed\n"); return 1; }
+	/* Real-hardware Vita testing traced a deterministic crash to spdlog's
+	 * async_logger thread-pool signaling (a condition_variable + mutex,
+	 * VitaSDK's pte_osMutexLock wraps a real kernel call) firing from
+	 * inside the game coroutine's manually swapped stack - the same class
+	 * of "syscall from an unregistered stack faults on real hardware" bug
+	 * as sceKernelDelayThread/write() calls made from the same place (see
+	 * docs/bugs/). A prior session's temporary debug/info level override
+	 * here (since reverted) made ArchiveManager/ResourceManager's routine
+	 * per-resource INFO logs - which fire constantly during resource
+	 * loading inside the coroutine - reach that thread pool on every call.
+	 * At the default releaseBuildLogLevel (warn), spdlog's should_log()
+	 * check filters those out before any thread-pool interaction happens,
+	 * which is what actually avoids the crash - not just a log-volume
+	 * cleanup. */
+	if (!sContext->InitLogging()) { port_log("SSB64: InitLogging failed\n"); return 1; }
 	port_log("SSB64: Logging OK\n");
 
 	if (!sContext->InitConfiguration()) { port_log("SSB64: InitConfiguration failed\n"); return 1; }
@@ -1179,6 +1196,9 @@ static int PortInitImpl(int argc, char* argv[]) {
 #endif
 
 	port_log("SSB64: init complete\n");
+#ifdef __vita__
+	sceKernelDelayThread(80000);
+#endif
 	return 0;
 }
 
@@ -1283,6 +1303,83 @@ int main(int argc, char* argv[]) {
 		}
 		port_log_init(logPath.c_str());
 	}
+
+#ifdef __vita__
+	/* Real-hardware testing traced a crash to newlib's malloc taking its
+	 * mmap_chunk() path for any single allocation >= DEFAULT_MMAP_THRESHOLD
+	 * (128KB, mallocr.c) - unlike ordinary sbrk-backed allocations (which
+	 * just advance a pointer within the one-time 256MiB pool
+	 * _newlib_heap_size_user reserves at startup via _init_vita_heap()),
+	 * this path makes a fresh kernel call on every single qualifying
+	 * request. That's the same "syscall from the game coroutine's
+	 * manually swapped stack faults on real hardware" bug as the mutex/
+	 * promise issues in docs/bugs/, but it can't be fixed by pre-warming
+	 * anything (confirmed: warming up 1-4MiB allocations on the main
+	 * thread first didn't stop later large allocations from the coroutine
+	 * from crashing) since it isn't a one-time lazy-init cost - it's a
+	 * per-call code path. Audio/resource assets routinely exceed 128KB
+	 * (a single wavetable blob was ~1MB in testing), so this is hit
+	 * constantly once real asset loading starts. Disabling mmap entirely
+	 * forces every allocation, regardless of size, through the sbrk path
+	 * instead - real hardware testing confirmed this fixes it for most
+	 * runs, but not all - a later run still hit the identical mmap_chunk
+	 * crash signature, so either M_MMAP_MAX isn't fully honored on this
+	 * newlib build or something else still reaches mmap_chunk() directly.
+	 * Also raise M_MMAP_THRESHOLD as a redundant belt-and-braces measure,
+	 * and log both return codes (0 = tunable not recognized on this
+	 * build, per GNU mallopt semantics) so a future capture can tell
+	 * whether this call is silently a no-op. */
+	{
+		int r1 = mallopt(M_MMAP_MAX, 0);
+		int r2 = mallopt(M_MMAP_THRESHOLD, 256 * 1024 * 1024);
+		port_log("SSB64: DIAG mallopt(M_MMAP_MAX,0)=%d mallopt(M_MMAP_THRESHOLD,256MiB)=%d\n", r1, r2);
+	}
+
+	/* Same lazy-first-use-kernel-object pattern already found and fixed
+	 * for pthread mutexes, std::promise/future, and ResourceManager::mMutex
+	 * this session: newlib's malloc locks a reentrancy mutex on every call,
+	 * and that mutex's underlying Vita kernel lightweight-mutex object is
+	 * created lazily on its first-ever lock, not at process start. A
+	 * coredump on real hardware showed the game coroutine crashing inside
+	 * _malloc_r (mallocr.c) at a bare SceLibKernel syscall trampoline right
+	 * after creating its first N64-emulated OS threads - consistent with
+	 * that lazy creation happening for the first time from the coroutine's
+	 * manually-swapped stack, which every other instance of this pattern
+	 * has confirmed is fatal on real hardware. Doing one throwaway
+	 * malloc/free here, on main()'s real stack before any coroutine exists,
+	 * forces that one-time kernel object creation to happen somewhere safe. */
+	{
+		void *warm = malloc(64);
+		if (warm != NULL) {
+			free(warm);
+		}
+		port_log("SSB64: DIAG malloc pre-warm done (forces lazy lock creation off the coroutine stack)\n");
+	}
+
+	/* Same reasoning, but for memalign() specifically: PortGameInit() calls
+	 * port_coroutine_create() for the top-level game coroutine before any
+	 * coroutine exists yet, and that allocates the coroutine's stack via
+	 * memalign(pagesize, 1 MiB) (port/coroutine_android.cpp). A coredump
+	 * showed this crashing at the same bare SceLibKernel trampoline as the
+	 * plain-malloc case above, but *before* "Starting game coroutine" even
+	 * printed - i.e. on main()'s own real stack, not inside any coroutine.
+	 * memalign's alignment requirement commonly routes it straight to mmap
+	 * regardless of the M_MMAP_THRESHOLD tunable set above (that tunable
+	 * governs plain malloc's size-based mmap fallback, not memalign's
+	 * alignment-driven one) - so it likely has its own separate lazy
+	 * kernel-lock/mmap-object first-use cost that the plain malloc pre-warm
+	 * above didn't exercise. Warm it here with the exact size class the
+	 * real coroutine stack will request. */
+	{
+		long ps_v = sysconf(_SC_PAGESIZE);
+		size_t ps = (ps_v > 0) ? (size_t)ps_v : 4096;
+		void *warm = memalign(ps, 1024 * 1024);
+		if (warm != NULL) {
+			free(warm);
+		}
+		port_log("SSB64: DIAG memalign pre-warm done (1MiB, page-aligned)\n");
+	}
+#endif
 
 #ifdef __APPLE__
 	/* Disable the macOS press-and-hold accent/diacritic popup for this app.

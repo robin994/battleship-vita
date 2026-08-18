@@ -42,6 +42,8 @@
 #include <string>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <typeinfo>
 
 /* GBI trace system */
 #include "../debug_tools/gbi_trace/gbi_trace.h"
@@ -140,7 +142,22 @@ static void game_coroutine_entry(void *arg)
 {
 	(void)arg;
 	port_log("SSB64: Game coroutine started — entering syMainLoop\n");
-	syMainLoop();
+	/* syMainLoop() runs entirely on this coroutine's own manually swapped
+	 * stack (port_coroutine_swap, port/coroutine_armv7.S). A C++ exception
+	 * thrown in here has no valid unwind path back across that raw stack
+	 * switch to main()'s top-level try/catch (port.cpp) - the unwinder's
+	 * .eh_frame walk doesn't know about our hand-rolled fiber swap, so it
+	 * doesn't just fail to be caught, it crashes outright. Catch locally,
+	 * while still on this stack, so at minimum the real exception message
+	 * reaches the log instead of an opaque data abort. */
+	try {
+		syMainLoop();
+	} catch (const std::exception& e) {
+		port_log("SSB64: CAUGHT exception in syMainLoop (coroutine): %s: %s\n",
+		         typeid(e).name(), e.what());
+	} catch (...) {
+		port_log("SSB64: CAUGHT unknown exception in syMainLoop (coroutine)\n");
+	}
 	port_log("SSB64: syMainLoop returned — boot chain complete\n");
 	/* All thread coroutines are now created and suspended.
 	 * PortPushFrame will resume them directly via port_resume_service_threads. */
