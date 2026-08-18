@@ -324,7 +324,7 @@ void RenderPostProcessDiagnostics(WidgetInfo& /*widget*/) {
     if (diag.active) {
         ImGui::Text("Active:  %s", diag.name.c_str());
         ImGui::Text("Flavor:  %s", diag.flavor.c_str());
-        ImGui::Text("Passes:  %zu", diag.passCount);
+        ImGui::Text("Passes:  %u", (unsigned int)diag.passCount);
     } else if (!diag.lastError.empty()) {
         ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f), "Inactive — last error:");
         ImGui::TextWrapped("%s", diag.lastError.c_str());
@@ -537,8 +537,8 @@ void RenderShaderPackModal() {
             break;
         }
         case ShaderPackPhase::AwaitingSelection: {
-            ImGui::TextWrapped("%zu shaders available. Tick the ones you'd like to install.",
-                               s_shaderPackCandidatesUi.size());
+            ImGui::TextWrapped("%u shaders available. Tick the ones you'd like to install.",
+                               (unsigned int)s_shaderPackCandidatesUi.size());
             ImGui::Spacing();
 
             if (UIWidgets::Button("Select all",

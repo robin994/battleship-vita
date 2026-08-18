@@ -1558,10 +1558,15 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 		unsigned int descFileId = 0;
 		const char *descPath = nullptr;
 		int described = portRelocDescribePointer(addr, &descBase, &descSize, &descFileId, &descPath);
-		port_log("SSB64: runtimeTexFix addr=%p req=0x%x fileBase=%p fileSize=0x%zx off=0x%zx num=0x%x desc=%d file=%u descBase=%p descSize=0x%zx path=%s\n",
-		         addr, num_bytes, (void*)fileBase, fileSize, target_offset, num_bytes,
+		/* %zx silently prints as the literal characters "zx" on this
+		 * VitaSDK newlib build (its vsnprintf doesn't support the 'z'
+		 * length modifier) - every size_t field showed up as "0xzx"
+		 * instead of a real value. size_t is 32-bit on this target, so
+		 * %x with an explicit cast is equivalent and actually works. */
+		port_log("SSB64: runtimeTexFix addr=%p req=0x%x fileBase=%p fileSize=0x%x off=0x%x num=0x%x desc=%d file=%u descBase=%p descSize=0x%x path=%s\n",
+		         addr, num_bytes, (void*)fileBase, (unsigned int)fileSize, (unsigned int)target_offset, num_bytes,
 		         described, descFileId, (void*)descBase,
-		         descSize, descPath ? descPath : "(unknown)");
+		         (unsigned int)descSize, descPath ? descPath : "(unknown)");
 		sRuntimeTexTraceCount++;
 	}
 
@@ -1651,8 +1656,8 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 	if (tex_log_enabled()) {
 		int rt_file_id = portRelocFindFileIdAndBase(addr, nullptr);
 		char note[64];
-		std::snprintf(note, sizeof(note), "fixed=%zu skipped=%zu",
-		              fixed_words, skipped_words);
+		std::snprintf(note, sizeof(note), "fixed=%u skipped=%u",
+		              (unsigned int)fixed_words, (unsigned int)skipped_words);
 		tex_log_emit("runtime.fix", rt_file_id,
 		             (uint32_t)target_offset, num_bytes,
 		             -1, -1, -1, reinterpret_cast<uint32_t *>(target), note);
@@ -1721,9 +1726,9 @@ extern "C" void portRelocFixupVertexAtRuntime(const void *addr, unsigned int num
 			sBank104Trace++;
 			if (sBank104Trace <= 5) {
 				const uint8_t *p = (const uint8_t *)addr;
-				port_log("[STAGE_AUDIT_104] call#%u addr=%p num_vtx=%u fixed=%u skipped=%u offset=0x%zx bytes=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n",
+				port_log("[STAGE_AUDIT_104] call#%u addr=%p num_vtx=%u fixed=%u skipped=%u offset=0x%x bytes=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n",
 				         sBank104Trace, addr, num_vtx, fixed_here, skipped_here,
-				         (size_t)(target - fileBase),
+				         (unsigned int)(size_t)(target - fileBase),
 				         p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
 				         p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
 			}

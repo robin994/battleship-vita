@@ -678,7 +678,13 @@ static int PortInitImpl(int argc, char* argv[]) {
 
 	port_log("SSB64: Context instance created\n");
 
-	if (!sContext->InitLogging()) { port_log("SSB64: InitLogging failed\n"); return 1; }
+	/* TEMPORARY DIAGNOSTIC (revert after use): InitLogging()'s default
+	 * releaseBuildLogLevel is spdlog::level::warn (Context.h), which was
+	 * silently filtering out every ResourceManager/ArchiveManager INFO log
+	 * before it ever reached a sink - independent of the flush_on policy.
+	 * That's why BattleShip.log stayed at 0 bytes even after switching
+	 * flush_on to info. Passing info here lets those logs through. */
+	if (!sContext->InitLogging(spdlog::level::debug, spdlog::level::info)) { port_log("SSB64: InitLogging failed\n"); return 1; }
 	port_log("SSB64: Logging OK\n");
 
 	if (!sContext->InitConfiguration()) { port_log("SSB64: InitConfiguration failed\n"); return 1; }
@@ -1033,8 +1039,11 @@ static int PortInitImpl(int argc, char* argv[]) {
 		if (!sContext->InitAudio(audio)) { port_log("SSB64: InitAudio failed\n"); return 1; }
 		port_log("SSB64: Audio initialized at %d Hz\n", (int)audio.SampleRate);
 	}
+	port_log("SSB64: calling InitGfxDebugger ...\n");
 	if (!sContext->InitGfxDebugger()) { port_log("SSB64: InitGfxDebugger failed\n"); return 1; }
+	port_log("SSB64: InitGfxDebugger OK\n");
 
+	port_log("SSB64: calling InitEventSystem ...\n");
 	if (!sContext->InitEventSystem()) { port_log("SSB64: InitEventSystem failed\n"); return 1; }
 	port_log("SSB64: EventSystem initialized\n");
 
@@ -1236,6 +1245,26 @@ int PortIsRunning(void) {
 }
 
 } // extern "C"
+
+#ifdef __vita__
+#include <psp2common/types.h>
+/* Both weak defaults are far too small for this engine and neither was ever
+ * overridden - confirmed via a real-hardware coredump where the crashing
+ * thread's own stack mapping was only 16KB total with ~4.5KB left below SP,
+ * a call chain deep enough (libzip -> newlib stdio -> lseek syscall stub)
+ * to exhaust it. sceUserMainThreadStackSize is read by vita-elf-create from
+ * this exact symbol name; _newlib_heap_size_user overrides newlib's 128MiB
+ * default heap cap (see vitasdk's newlib_heapsize_ctrl sample). */
+extern "C" unsigned int sceUserMainThreadStackSize = SCE_KERNEL_4MiB;
+/* Up-front reservation (_init_vita_heap grabs the whole block at startup),
+ * not a ceiling. Do NOT lower this casually: 192MiB was tried to leave more
+ * room for GXM and produced a hard data abort on real hardware very early in
+ * InitResourceManager - malloc handed out a pointer into unmapped memory
+ * (_malloc_r -> operator new -> _Sp_counted_base ctor -> data abort writing
+ * the fresh allocation), i.e. the heap block itself came back unusable.
+ * 256MiB is the value this build is verified to boot with. */
+extern "C" unsigned int _newlib_heap_size_user = SCE_KERNEL_256MiB;
+#endif
 
 int main(int argc, char* argv[]) {
 	/* Use an absolute path for ssb64.log so it lands in a predictable

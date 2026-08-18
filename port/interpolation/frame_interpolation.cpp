@@ -274,8 +274,8 @@ extern "C" void portInterpBeginDraw(void)
         static bool sWarned = false;
         if (!sWarned) {
             sWarned = true;
-            port_log("SSB64: interp — WARNING: record buffer overflow (>%zu), tick rendered without interpolation\n",
-                     kMaxRecords);
+            port_log("SSB64: interp — WARNING: record buffer overflow (>%u), tick rendered without interpolation\n",
+                     (unsigned int)kMaxRecords);
         }
         return;
     }

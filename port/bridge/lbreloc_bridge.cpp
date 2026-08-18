@@ -693,8 +693,8 @@ extern "C" void portRelocLoadFileFromBytes(
 			spdlog::error("lbReloc bridge: file_id {} intern chain walk STOPPED "
 			              "(off={} steps={} copySize={}) — corrupt chain word",
 			              file_id, reloc_intern, intern_steps, copySize);
-			port_log("SSB64: chainWalk STOP intern file=%u off=0x%x steps=%u size=0x%zx\n",
-			         file_id, (unsigned)reloc_intern, (unsigned)intern_steps, copySize);
+			port_log("SSB64: chainWalk STOP intern file=%u off=0x%x steps=%u size=0x%x\n",
+			         file_id, (unsigned)reloc_intern, (unsigned)intern_steps, (unsigned int)copySize);
 			break;
 		}
 		u32 *slot = (u32 *)((uintptr_t)ram_dst + (reloc_intern * sizeof(u32)));
@@ -714,8 +714,8 @@ extern "C" void portRelocLoadFileFromBytes(
 			spdlog::error("lbReloc bridge: file_id {} intern chain target OOB "
 			              "(slot_off={} target_words={} copySize={}) — stopping walk",
 			              file_id, reloc_intern, words_num, copySize);
-			port_log("SSB64: chainWalk STOP intern-target-oob file=%u slot=0x%x tgt=0x%x size=0x%zx\n",
-			         file_id, (unsigned)reloc_intern, (unsigned)words_num, copySize);
+			port_log("SSB64: chainWalk STOP intern-target-oob file=%u slot=0x%x tgt=0x%x size=0x%x\n",
+			         file_id, (unsigned)reloc_intern, (unsigned)words_num, (unsigned int)copySize);
 			break;
 		}
 
@@ -776,8 +776,8 @@ extern "C" void portRelocLoadFileFromBytes(
 			spdlog::error("lbReloc bridge: file_id {} extern chain walk STOPPED "
 			              "(off={} steps={} copySize={}) — corrupt chain word",
 			              file_id, reloc_extern, extern_steps, copySize);
-			port_log("SSB64: chainWalk STOP extern file=%u off=0x%x steps=%u size=0x%zx\n",
-			         file_id, (unsigned)reloc_extern, (unsigned)extern_steps, copySize);
+			port_log("SSB64: chainWalk STOP extern file=%u off=0x%x steps=%u size=0x%x\n",
+			         file_id, (unsigned)reloc_extern, (unsigned)extern_steps, (unsigned int)copySize);
 			break;
 		}
 		u32 *slot = (u32 *)((uintptr_t)ram_dst + (reloc_extern * sizeof(u32)));

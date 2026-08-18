@@ -106,7 +106,7 @@ void MaybeDumpMiss(uint8_t fmt, uint8_t siz, const uint8_t* rgba8, uint16_t w, u
         std::error_code ec;
         std::filesystem::create_directories(gMissDumpDir, ec);
         gMissDumpDirReady = true;
-        port_log("HiResPack: miss-dump active -> %s (cap=%zu)\n", gMissDumpDir.c_str(), cap);
+        port_log("HiResPack: miss-dump active -> %s (cap=%u)\n", gMissDumpDir.c_str(), (unsigned int)cap);
     }
 
     // Stem encodes the port's native lookup key verbatim:

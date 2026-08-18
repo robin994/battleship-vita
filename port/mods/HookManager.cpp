@@ -344,8 +344,8 @@ int HookManager::InstallHook(const char *symbol_name, void *replacement,
     if (original_out != nullptr) {
         *original_out = new_trampoline;
     }
-    port_log("[mods] chained %s @ %p (trampoline=%p, chain=%zu, owner=%s)\n",
-             symbol_name, target, new_trampoline, st.chain.size(),
+    port_log("[mods] chained %s @ %p (trampoline=%p, chain=%u, owner=%s)\n",
+             symbol_name, target, new_trampoline, (unsigned int)st.chain.size(),
              sCurrentOwner.empty() ? "(unowned)" : sCurrentOwner.c_str());
     return 0;
 }
@@ -448,12 +448,12 @@ int HookManager::UninstallHooksForOwner(const char *owner_id) {
                 st.chain_trampolines.erase(st.chain_trampolines.begin() + i);
 
                 port_log(
-                    "[mods] uninstalled %p[%d] (owner=%s, %s, chain=%zu)\n",
+                    "[mods] uninstalled %p[%d] (owner=%s, %s, chain=%u)\n",
                     chain_it->first, i, oid.c_str(),
                     is_top ? (st.chain.empty() ? "chain emptied" : "was top")
                            : (is_bottom ? "was bottom (mid-chain skip)"
                                         : "mid-chain"),
-                    st.chain.size());
+                    (unsigned int)st.chain.size());
                 removed++;
                 any_removed = true;
                 break; /* restart after vector mutation */

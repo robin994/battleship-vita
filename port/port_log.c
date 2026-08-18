@@ -5,124 +5,225 @@
 #include <string.h>
 #include <pthread.h>
 
+#ifdef __vita__
+#include <psp2/kernel/clib.h>
+#endif
+
+#if defined(_WIN32)
+#include <io.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 /* Real-hardware testing repeatedly hit an auto-triggered psp2dmp with the
  * main thread stuck inside this log file's fflush -> write() syscall chain,
- * always at the exact same buffer-fill boundary (confirmed by dumping the
- * coredump's own captured stdio buffer contents - byte-identical across
- * independent runs, including after a mutex fix and a "force the first
- * flush early" fix, neither of which changed anything). The stop reason
- * (0x10006, never a real CPU exception in any crash this port has hit) is
- * consistent with an external watchdog snapshotting/killing the process
- * because the *main* thread hasn't made scheduler progress - and a
- * synchronous fprintf/fflush on real hardware's memory card is apparently
- * sometimes slow enough to trip whatever threshold that watchdog uses.
+ * always at the exact same buffer-fill boundary. Moving the file write onto
+ * a dedicated writer thread (so no caller ever blocks on disk I/O) fixed
+ * *that* symptom, but real-hardware testing then showed a *different* one:
+ * with sceClibPrintf funneled through the same single writer thread as the
+ * file write (to avoid a suspected multi-thread contention issue on the
+ * shared debug-output channel), the live network-captured log appeared to
+ * freeze - except a one-off direct (queue-bypassing) sceClibPrintf call
+ * placed further down in the boot sequence printed *before* the queued
+ * lines that logically preceded it. That's only possible if the game
+ * thread had already run well past the "frozen" point and the *writer
+ * thread* was simply the one stuck.
  *
- * Fix: take the game/audio/scheduler threads out of the disk-I/O path
- * entirely. port_log() only formats the line and pushes it onto a small
- * ring buffer (fast, in-memory, no I/O); a single dedicated writer thread
- * drains the queue and does the actual fputs to disk. Whatever the SD
- * card's real write latency is, it can no longer make the *watched* thread
- * (or any other caller) block on it. */
+ * Two independent queues, two independent writer threads, fixed the case
+ * where a slow file write could delay sceClibPrintf. It did NOT fix the
+ * file write itself: every rebuild (single queue, dual queue, forcing the
+ * very first flush to happen synchronously before the writer thread even
+ * existed) reproduced the *identical* stall, always the first time enough
+ * bytes had accumulated to fill libc's internal stdio buffer (1024 bytes
+ * on this newlib build) - i.e. the first implicit fflush() inside fputs().
+ * That points at stdio's own buffering/locking on this VitaSDK newlib
+ * build, not at raw microSD latency (a multi-minute wait never completed
+ * either, which is deadlock-shaped, not slow-disk-shaped).
+ *
+ * Fix: bypass stdio for the file writer entirely. Use a raw fd and
+ * write(2) - the same async-signal-safe primitive port_watchdog.cpp
+ * already relies on for its own crash-time log writes - so there is no
+ * userspace buffer to fill and no stdio lock to contend on. */
 
 #define LOG_QUEUE_SLOTS 128
 #define LOG_LINE_MAX 512
 
-static FILE *sLogFile = NULL;
+typedef struct {
+	char lines[LOG_QUEUE_SLOTS][LOG_LINE_MAX];
+	int head; /* next slot to fill */
+	int tail; /* next slot to drain */
+	int count;
+	int shutdown;
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+	pthread_t thread;
+	int started;
+} LogQueue;
 
-static char sLogQueue[LOG_QUEUE_SLOTS][LOG_LINE_MAX];
-static int sQueueHead = 0; /* next slot to fill */
-static int sQueueTail = 0; /* next slot to drain */
-static int sQueueCount = 0;
-static int sShutdown = 0;
+static int sLogFd = -1;
+static LogQueue sPrintQueue = { .mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
+static LogQueue sFileQueue = { .mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 
-static pthread_mutex_t sQueueMutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t sQueueCond = PTHREAD_COND_INITIALIZER;
-static pthread_t sWriterThread;
-static int sWriterThreadStarted = 0;
+static void QueuePush(LogQueue *q, const char *line)
+{
+	pthread_mutex_lock(&q->mutex);
+	if (q->count >= LOG_QUEUE_SLOTS) {
+		/* Drop rather than block the caller - the whole point of this
+		 * queue is to keep slow I/O off whatever thread is logging. */
+		pthread_mutex_unlock(&q->mutex);
+		return;
+	}
+	memcpy(q->lines[q->head], line, LOG_LINE_MAX);
+	q->head = (q->head + 1) % LOG_QUEUE_SLOTS;
+	q->count++;
+	pthread_cond_signal(&q->cond);
+	pthread_mutex_unlock(&q->mutex);
+}
 
-static void *LogWriterMain(void *arg)
+/* Returns 0 and fills `out` with the next line, or returns nonzero once
+ * shutdown is requested and the queue has been fully drained. */
+static int QueuePop(LogQueue *q, char *out)
+{
+	pthread_mutex_lock(&q->mutex);
+	while (q->count == 0 && !q->shutdown) {
+		pthread_cond_wait(&q->cond, &q->mutex);
+	}
+	if (q->count == 0 && q->shutdown) {
+		pthread_mutex_unlock(&q->mutex);
+		return 1;
+	}
+	memcpy(out, q->lines[q->tail], LOG_LINE_MAX);
+	q->tail = (q->tail + 1) % LOG_QUEUE_SLOTS;
+	q->count--;
+	pthread_mutex_unlock(&q->mutex);
+	return 0;
+}
+
+static void QueueShutdown(LogQueue *q)
+{
+	pthread_mutex_lock(&q->mutex);
+	q->shutdown = 1;
+	pthread_cond_signal(&q->cond);
+	pthread_mutex_unlock(&q->mutex);
+}
+
+#ifdef __vita__
+static void *PrintWriterMain(void *arg)
 {
 	(void)arg;
-	for (;;) {
-		pthread_mutex_lock(&sQueueMutex);
-		while (sQueueCount == 0 && !sShutdown) {
-			pthread_cond_wait(&sQueueCond, &sQueueMutex);
-		}
-		if (sQueueCount == 0 && sShutdown) {
-			pthread_mutex_unlock(&sQueueMutex);
-			break;
-		}
-		char line[LOG_LINE_MAX];
-		memcpy(line, sLogQueue[sQueueTail], LOG_LINE_MAX);
-		sQueueTail = (sQueueTail + 1) % LOG_QUEUE_SLOTS;
-		sQueueCount--;
-		pthread_mutex_unlock(&sQueueMutex);
-
-		if (sLogFile != NULL) {
-			fputs(line, sLogFile);
-		}
+	char line[LOG_LINE_MAX];
+	while (QueuePop(&sPrintQueue, line) == 0) {
+		sceClibPrintf("%s", line);
 	}
-	if (sLogFile != NULL) {
-		fflush(sLogFile);
+	return NULL;
+}
+#endif
+
+/* write(2) may write fewer bytes than requested even for a regular file;
+ * loop until the whole line is out (or a real error, which we can't do
+ * anything about here - there's no lower-level channel to report it on). */
+static void WriteAll(int fd, const char *buf, size_t len)
+{
+	size_t off = 0;
+	while (off < len) {
+#if defined(_WIN32)
+		int n = _write(fd, buf + off, (unsigned int)(len - off));
+#else
+		ssize_t n = write(fd, buf + off, len - off);
+#endif
+		if (n <= 0) return;
+		off += (size_t)n;
+	}
+}
+
+static void *FileWriterMain(void *arg)
+{
+	(void)arg;
+	char line[LOG_LINE_MAX];
+	while (QueuePop(&sFileQueue, line) == 0) {
+		if (sLogFd >= 0) {
+			WriteAll(sLogFd, line, strlen(line));
+		}
 	}
 	return NULL;
 }
 
 void port_log_init(const char *path)
 {
-	if (sLogFile != NULL) return;
-	sLogFile = fopen(path, "w");
-	if (sLogFile == NULL) return;
+	if (sLogFd >= 0) return;
+#if defined(_WIN32)
+	_sopen_s(&sLogFd, path, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY,
+	         _SH_DENYNO, _S_IREAD | _S_IWRITE);
+#else
+	sLogFd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+#endif
+	if (sLogFd < 0) return;
 
-	if (pthread_create(&sWriterThread, NULL, LogWriterMain, NULL) == 0) {
-		sWriterThreadStarted = 1;
+	/* Default pthread stack size on VitaSDK is tiny - real-hardware testing
+	 * this session found a crashing thread's entire stack mapping was only
+	 * 16KB. These threads' own call chains are shallow (format a string,
+	 * call write()), but WriteAll()'s underlying newlib/syscall path is the
+	 * same one that has already been seen to run deep on this platform, so
+	 * give them real headroom rather than relying on the tiny default. */
+	pthread_attr_t stack_attr;
+	pthread_attr_init(&stack_attr);
+	pthread_attr_setstacksize(&stack_attr, 64 * 1024);
+
+	if (pthread_create(&sFileQueue.thread, &stack_attr, FileWriterMain, NULL) == 0) {
+		sFileQueue.started = 1;
 	}
+#ifdef __vita__
+	if (pthread_create(&sPrintQueue.thread, &stack_attr, PrintWriterMain, NULL) == 0) {
+		sPrintQueue.started = 1;
+	}
+#endif
+	pthread_attr_destroy(&stack_attr);
 }
 
 void port_log_close(void)
 {
-	if (sWriterThreadStarted) {
-		pthread_mutex_lock(&sQueueMutex);
-		sShutdown = 1;
-		pthread_cond_signal(&sQueueCond);
-		pthread_mutex_unlock(&sQueueMutex);
-		pthread_join(sWriterThread, NULL);
-		sWriterThreadStarted = 0;
+	if (sFileQueue.started) {
+		QueueShutdown(&sFileQueue);
+		pthread_join(sFileQueue.thread, NULL);
+		sFileQueue.started = 0;
 	}
-	if (sLogFile != NULL) {
-		fclose(sLogFile);
-		sLogFile = NULL;
+	if (sPrintQueue.started) {
+		QueueShutdown(&sPrintQueue);
+		pthread_join(sPrintQueue.thread, NULL);
+		sPrintQueue.started = 0;
+	}
+	if (sLogFd >= 0) {
+#if defined(_WIN32)
+		_close(sLogFd);
+#else
+		close(sLogFd);
+#endif
+		sLogFd = -1;
 	}
 }
 
 int port_log_get_fd(void)
 {
-	if (sLogFile == NULL) return -1;
-	return fileno(sLogFile);
+	return sLogFd;
 }
 
 void port_log(const char *fmt, ...)
 {
-	if (sLogFile == NULL) return;
-
 	char formatted[LOG_LINE_MAX];
 	va_list ap;
 	va_start(ap, fmt);
 	vsnprintf(formatted, sizeof(formatted), fmt, ap);
 	va_end(ap);
 
-	pthread_mutex_lock(&sQueueMutex);
-	if (sQueueCount >= LOG_QUEUE_SLOTS) {
-		/* Queue full - drop the line rather than block the caller. The
-		 * whole point of this queue is to keep slow disk I/O off whatever
-		 * thread is calling port_log(); blocking here to wait for room
-		 * would defeat that. */
-		pthread_mutex_unlock(&sQueueMutex);
-		return;
+#ifdef __vita__
+	if (sPrintQueue.started) {
+		QueuePush(&sPrintQueue, formatted);
 	}
-	memcpy(sLogQueue[sQueueHead], formatted, LOG_LINE_MAX);
-	sQueueHead = (sQueueHead + 1) % LOG_QUEUE_SLOTS;
-	sQueueCount++;
-	pthread_cond_signal(&sQueueCond);
-	pthread_mutex_unlock(&sQueueMutex);
+#endif
+	if (sFileQueue.started) {
+		QueuePush(&sFileQueue, formatted);
+	}
 }

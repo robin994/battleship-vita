@@ -200,7 +200,7 @@ static inline uint32_t readNativeU32(const uint8_t *p, size_t off) {
  */
 static void byteSwapScriptBank(uint8_t *data, size_t size, const char *dbg) {
     if (size < 4) {
-        port_log("particle_bank[%s]: script blob too small (%zu bytes)\n", dbg, size);
+        port_log("particle_bank[%s]: script blob too small (%u bytes)\n", dbg, (unsigned int)size);
         return;
     }
     bswap32At(data, 0);
@@ -211,8 +211,8 @@ static void byteSwapScriptBank(uint8_t *data, size_t size, const char *dbg) {
     }
     const size_t table_end = 4 + static_cast<size_t>(scripts_num) * 4;
     if (table_end > size) {
-        port_log("particle_bank[%s]: script offset table (%zu) overflows blob (%zu)\n",
-                 dbg, table_end, size);
+        port_log("particle_bank[%s]: script offset table (%u) overflows blob (%u)\n",
+                 dbg, (unsigned int)table_end, (unsigned int)size);
         return;
     }
     for (int32_t i = 0; i < scripts_num; i++) {
@@ -255,7 +255,7 @@ static void byteSwapScriptBank(uint8_t *data, size_t size, const char *dbg) {
 static void byteSwapTextureBank(uint8_t *data, size_t size, const char *dbg) {
     static constexpr int32_t kImFmtCi = 2;  /* G_IM_FMT_CI */
     if (size < 4) {
-        port_log("particle_bank[%s]: texture blob too small (%zu bytes)\n", dbg, size);
+        port_log("particle_bank[%s]: texture blob too small (%u bytes)\n", dbg, (unsigned int)size);
         return;
     }
     bswap32At(data, 0);
@@ -266,8 +266,8 @@ static void byteSwapTextureBank(uint8_t *data, size_t size, const char *dbg) {
     }
     const size_t table_end = 4 + static_cast<size_t>(textures_num) * 4;
     if (table_end > size) {
-        port_log("particle_bank[%s]: texture offset table (%zu) overflows blob (%zu)\n",
-                 dbg, table_end, size);
+        port_log("particle_bank[%s]: texture offset table (%u) overflows blob (%u)\n",
+                 dbg, (unsigned int)table_end, (unsigned int)size);
         return;
     }
     for (int32_t i = 0; i < textures_num; i++) {
@@ -297,8 +297,8 @@ static void byteSwapTextureBank(uint8_t *data, size_t size, const char *dbg) {
         }
         const size_t data_end = tex_off + 0x18 + static_cast<size_t>(total_data_entries) * 4;
         if (data_end > size) {
-            port_log("particle_bank[%s]: texture %d data[] (%zu) overflows blob (%zu)\n",
-                     dbg, i, data_end, size);
+            port_log("particle_bank[%s]: texture %d data[] (%u) overflows blob (%u)\n",
+                     dbg, i, (unsigned int)data_end, (unsigned int)size);
             continue;
         }
         for (uint32_t k = 0; k < total_data_entries; k++) {
@@ -419,9 +419,9 @@ extern "C" int portParticleLoadBank(uintptr_t scripts_lo, int bank_id) {
     int32_t scripts_num  = static_cast<int32_t>(readNativeU32(working->script_data.data(),  0));
     int32_t textures_num = static_cast<int32_t>(readNativeU32(working->texture_data.data(), 0));
 
-    port_log("particle_bank[%s]: bank_id=%d scripts=%d (%zu bytes) textures=%d (%zu bytes)\n",
-             match->debug_name, bank_id, scripts_num, working->script_data.size(),
-             textures_num, working->texture_data.size());
+    port_log("particle_bank[%s]: bank_id=%d scripts=%d (%u bytes) textures=%d (%u bytes)\n",
+             match->debug_name, bank_id, scripts_num, (unsigned int)working->script_data.size(),
+             textures_num, (unsigned int)working->texture_data.size());
 
     void *script_desc  = working->script_data.data();
     void *texture_desc = working->texture_data.data();

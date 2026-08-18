@@ -2,6 +2,7 @@
 
 #include "libultraship/bridge/consolevariablebridge.h"
 #include "hooks/Events.h"
+#include "port_log.h"
 
 namespace ssb64 {
 
@@ -24,7 +25,9 @@ static void OnWindowFocus(IEvent* raw) {
 }
 
 void RegisterFocusListener() {
+    port_log("SSB64: RegisterFocusListener — start\n");
     REGISTER_LISTENER(WindowFocusEvent, EVENT_PRIORITY_NORMAL, OnWindowFocus);
+    port_log("SSB64: RegisterFocusListener — done\n");
 }
 
 } // namespace ssb64

@@ -128,8 +128,8 @@ extern "C" int port_save_write(uintptr_t offset, const void *src, size_t size)
     std::fclose(f);
 
     if (wrote != size) {
-        port_log("SSB64 Save: short write (%zu/%zu) at offset 0x%lx\n",
-                 wrote, size, (unsigned long)offset);
+        port_log("SSB64 Save: short write (%u/%u) at offset 0x%x\n",
+                 (unsigned int)wrote, (unsigned int)size, (unsigned int)offset);
         return -1;
     }
     return 0;

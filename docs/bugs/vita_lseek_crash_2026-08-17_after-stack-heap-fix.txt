@@ -1,0 +1,132 @@
+=== THREADS ===
+    SSB64VITA
+        ID: 0x40010003
+        Stop reason: 0x10006 ()
+        Status: 0x1 (Running)
+        PC: 0x8187ffd8 (battleship.elf@1 + 0x803fd8 => b'?? ??:0')
+    SceCommonDialogWorker
+        ID: 0x400100c3
+        Stop reason: 0x0 (No reason)
+        Status: 0x8 (Waiting)
+        PC: 0xe000b034 (SceLibKernel@1 + 0x6304)
+    pthread
+        ID: 0x4001010d
+        Stop reason: 0x0 (No reason)
+        Status: 0x1 (Running)
+        PC: 0x81880008 (battleship.elf@1 + 0x804008 => b'?? ??:0')
+    pthread
+        ID: 0x4001011f
+        Stop reason: 0x0 (No reason)
+        Status: 0x1 (Running)
+        PC: 0xe000b614 (SceLibKernel@1 + 0x68e4)
+    pthread
+        ID: 0x40010133
+        Stop reason: 0x0 (No reason)
+        Status: 0x1 (Running)
+        PC: 0xe000b034 (SceLibKernel@1 + 0x6304)
+    vitaGL Garbage Collector
+        ID: 0x40010173
+        Stop reason: 0x0 (No reason)
+        Status: 0x8 (Waiting)
+        PC: 0xe000b034 (SceLibKernel@1 + 0x6304)
+    SceGxmDisplayQueue
+        ID: 0x4001017f
+        Stop reason: 0x0 (No reason)
+        Status: 0x8 (Waiting)
+        PC: 0xe000b444 (SceLibKernel@1 + 0x6714)
+    SDLAudioP2
+        ID: 0x400101b1
+        Stop reason: 0x0 (No reason)
+        Status: 0x1 (Running)
+        PC: 0x8187fc08 (battleship.elf@1 + 0x803c08 => b'?? ??:0')
+
+=== THREAD "SSB64VITA" <0x40010003> CRASHED () ===
+
+DISASSEMBLY AROUND PC: 0x8187ffd8 (ARM):
+[90m[0m
+[90m81803fc8 <sceIoClose-0x81803f98>:[0m
+[90m81803fc8:	e1a00000 	nop			@ (mov r0, r0)[0m
+[90m81803fcc:	00000000 	andeq	r0, r0, r0[0m
+[90m81803fd0:	e3e00000 	mvn	r0, #0[0m
+[90m81803fd4:	e12fff1e 	bx	lr[0m
+[91m!!! 		e1a00000 	nop			@ (mov r0, r0) !!![0m
+[90m81803fdc:	00000000 	andeq	r0, r0, r0[0m
+[90m81803fe0:	e3e00000 	mvn	r0, #0[0m
+[90m81803fe4:	e12fff1e 	bx	lr[0m
+[90m[0m
+
+DISASSEMBLY AROUND LR: 0x81873d56 (Thumb):
+[90m[0m
+[90m817f7d46 <_ZN3fmt2v96detail18throw_format_errorEPKc-0x8080833a>:[0m
+[90m817f7d46:	4620      	mov	r0, r4[0m
+[90m817f7d48:	e8bd 81f0 	ldmia.w	sp!, {r4, r5, r6, r7, r8, pc}[0m
+[90m817f7d4c:	6800      	ldr	r0, [r0, #0][0m
+[90m817f7d4e:	463a      	mov	r2, r7[0m
+[90m817f7d50:	4631      	mov	r1, r6[0m
+[90m817f7d52:	f00c e93e 	blx	81803fd0 <GEN_WEAK_EXPORTS+0x81803fd0>[0m
+[91m!!! 		4604      	mov	r4, r0 !!![0m
+[90m817f7d58:	e7f0      	b.n	817f7d3c <_ZN3fmt2v96detail18throw_format_errorEPKc-0x80808344>[0m
+[90m817f7d5a:	4620      	mov	r0, r4[0m
+[90m817f7d5c:	2100      	movs	r1, #0[0m
+[90m817f7d5e:	f7f1 ff3b 	bl	817e9bd8 <_ZN3fmt2v96detail18throw_format_errorEPKc-0x808164a8>[0m
+[90m817f7d62:	f04f 34ff 	mov.w	r4, #4294967295	@ 0xffffffff[0m
+[90m[0m
+REGISTERS:
+    R0: 0x400101a3
+    R1: 0x19400
+    R2: 0x0
+    R3: 0x0
+    R4: 0x82cabffc
+    R5: 0x82469ac8
+    R6: 0x19400
+    R7: 0x0
+    R8: 0x8246b720
+    R9: 0x0
+    R10: 0x8714c6d8
+    R11: 0x0
+    R12: 0x523
+    SP: 0x8714a1c0
+    PC: 0x8187ffd8 (battleship.elf@1 + 0x803fd8)
+    LR: 0x81873d57 (battleship.elf@1 + 0x7f7d57)
+
+STACK CONTENTS AROUND SP:
+          0x8714a180: 0x0
+          0x8714a184: 0x0
+          0x8714a188: 0x0
+          0x8714a18c: 0x0
+          0x8714a190: 0x0
+          0x8714a194: 0x0
+          0x8714a198: 0x0
+          0x8714a19c: 0x0
+          0x8714a1a0: 0x0
+          0x8714a1a4: 0x0
+          0x8714a1a8: 0x82469a30 (battleship.elf@2 + 0x969a30)
+          0x8714a1ac: 0x0
+          0x8714a1b0: 0x0
+          0x8714a1b4: 0x8186863d (battleship.elf@1 + 0x7ec63d => b'?? ??:0')
+          0x8714a1b8: 0x82cabffc
+          0x8714a1bc: 0x81873d29 (battleship.elf@1 + 0x7f7d29 => b'?? ??:0')
+    SP => 0x8714a1c0: 0x82cabffc
+          0x8714a1c4: 0x0
+          0x8714a1c8: 0x8246b720 (battleship.elf@2 + 0x96b720)
+          0x8714a1cc: 0x1974a
+          0x8714a1d0: 0x8186b719 (battleship.elf@1 + 0x7ef719 => b'?? ??:0')
+          0x8714a1d4: 0x8186b725 (battleship.elf@1 + 0x7ef725 => b'?? ??:0')
+          0x8714a1d8: 0x82cabffc
+          0x8714a1dc: 0x818677db (battleship.elf@1 + 0x7eb7db => b'?? ??:0')
+          0x8714a1e0: 0x1974a
+          0x8714a1e4: 0x19400
+          0x8714a1e8: 0x0
+          0x8714a1ec: 0x0
+          0x8714a1f0: 0x0
+          0x8714a1f4: 0x0
+          0x8714a1f8: 0x0
+          0x8714a1fc: 0x0
+          0x8714a200: 0x82cabffc
+          0x8714a204: 0x82cabffc
+          0x8714a208: 0x1974a
+          0x8714a20c: 0x8714a230
+          0x8714a210: 0xffffffff
+          0x8714a214: 0x814f80cf (battleship.elf@1 + 0x47c0cf => b'?? ??:0')
+          0x8714a218: 0x82cabffc
+          0x8714a21c: 0x1974a

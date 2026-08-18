@@ -73,8 +73,8 @@ void SetWindowIcon() {
     SDL_SetWindowIcon(wnd, sfc);
     SDL_FreeSurface(sfc);   // SDL copies the pixels internally
     stbi_image_free(rgba);
-    port_log("SetWindowIcon: applied %dx%d RGBA icon (%zu bytes PNG)\n",
-             w, h, kSSB64IconPng_len);
+    port_log("SetWindowIcon: applied %dx%d RGBA icon (%u bytes PNG)\n",
+             w, h, (unsigned int)kSSB64IconPng_len);
 }
 
 }  // namespace ssb64

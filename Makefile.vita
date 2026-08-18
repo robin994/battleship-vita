@@ -221,7 +221,8 @@ CXX = $(PREFIX)-g++
 CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-short-enums -fsigned-char \
 	-I$(VITAGL_NOSPLASH_DIR)/source \
 	$(foreach dir,$(INCLUDES),-I$(dir)) -fno-strict-aliasing -DMA_NO_RUNTIME_LINKING \
-	-Wno-narrowing -DIMGUI_IMPL_OPENGL_ES2 -DSPDLOG_ACTIVE_LEVEL=6 -DFMT_HEADER_ONLY \
+	-DNDEBUG \
+	-Wno-narrowing -DIMGUI_IMPL_OPENGL_ES2 -DSPDLOG_ACTIVE_LEVEL=2 -DFMT_HEADER_ONLY \
 	-I$(VITASDK)/$(PREFIX)/include/SDL2 -DENABLE_OPENGL=1 \
 	-D_LANGUAGE_C -DCIMGUI_DEFINE_ENUMS_AND_STRUCTS \
 	-DAVOID_UB=1 -DF3DEX_GBI_2=1 -DNON_MATCHING=1 -DNON_EQUIVALENT=1 -DPORT=1 -DN_MICRO=1 \

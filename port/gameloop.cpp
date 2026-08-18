@@ -653,8 +653,8 @@ static void port_screenshot_init_once(void)
 			port_log("SSB64: screenshot capture ENABLED (all frames) dir='%s'\n",
 				sScreenshotDir.c_str());
 		} else {
-			port_log("SSB64: screenshot capture ENABLED (%zu frames) dir='%s'\n",
-				sScreenshotFrames.size(), sScreenshotDir.c_str());
+			port_log("SSB64: screenshot capture ENABLED (%u frames) dir='%s'\n",
+				(unsigned int)sScreenshotFrames.size(), sScreenshotDir.c_str());
 		}
 	}
 }

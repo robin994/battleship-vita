@@ -489,10 +489,10 @@ bool HiResPack::Init() {
         return false;
     }
 
-    port_log("HiResPack: scanned %s — %zu files, %zu indexed, %zu unparsed, %zu hash collisions, %zu zip(s)\n",
+    port_log("HiResPack: scanned %s — %u files, %u indexed, %u unparsed, %u hash collisions, %u zip(s)\n",
              gModsRoot.c_str(),
-             mStats.scannedFiles, mStats.indexedTextures,
-             mStats.skippedFilenames, mStats.collisions, gOpenZips.size());
+             (unsigned int)mStats.scannedFiles, (unsigned int)mStats.indexedTextures,
+             (unsigned int)mStats.skippedFilenames, (unsigned int)mStats.collisions, (unsigned int)gOpenZips.size());
     return true;
 }
 
@@ -526,12 +526,12 @@ const DecodedTexture* HiResPack::Lookup(uint8_t fmt, uint8_t siz,
         double rate = mLookupStats.lookups
             ? (100.0 * (double)mLookupStats.hits / (double)mLookupStats.lookups)
             : 0.0;
-        port_log("HiResPack: %llu lookups, %llu hits (%.1f%%), %llu decode-fails, LRU=%zu MB\n",
+        port_log("HiResPack: %llu lookups, %llu hits (%.1f%%), %llu decode-fails, LRU=%u MB\n",
                  (unsigned long long)mLookupStats.lookups,
                  (unsigned long long)mLookupStats.hits,
                  rate,
                  (unsigned long long)mLookupStats.decodeFails,
-                 gLru.Bytes() / (1024u * 1024u));
+                 (unsigned int)(gLru.Bytes() / (1024u * 1024u)));
     }
 
     if (const DecodedTexture* hit = gLru.Get(key)) {

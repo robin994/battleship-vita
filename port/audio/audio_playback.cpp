@@ -219,8 +219,8 @@ extern "C" void portAudioSubmitFrame(const void *buf, int sampleCount)
     static bool sLoggedNonzero = false;
     if (sFirstSubmit) {
         sFirstSubmit = false;
-        port_log("SSB64 Audio: first synth frame submitted (sampleCount=%d bytes=%zu)\n",
-                 sampleCount, byteLen);
+        port_log("SSB64 Audio: first synth frame submitted (sampleCount=%d bytes=%u)\n",
+                 sampleCount, (unsigned int)byteLen);
     }
     if (!sLoggedNonzero) {
         const int16_t *s = reinterpret_cast<const int16_t *>(buf);
@@ -228,8 +228,8 @@ extern "C" void portAudioSubmitFrame(const void *buf, int sampleCount)
         for (size_t i = 0; i < count; i++) {
             if (s[i] != 0) {
                 sLoggedNonzero = true;
-                port_log("SSB64 Audio: first non-zero sample detected (idx=%zu v=%d)\n",
-                         i, (int)s[i]);
+                port_log("SSB64 Audio: first non-zero sample detected (idx=%u v=%d)\n",
+                         (unsigned int)i, (int)s[i]);
                 wavMaybeOpen();
                 break;
             }
