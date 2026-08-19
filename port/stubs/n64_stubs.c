@@ -48,7 +48,24 @@ extern int atoi(const char *nptr);
 /* Default stack sizes for coroutines.  N64 stacks are tiny (1-4KB) but
  * PC calling conventions and 64-bit pointers need much more. */
 #define PORT_STACK_SERVICE  (256 * 1024)  /* OS threads 1-8 */
-#define PORT_STACK_GOBJ     (64 * 1024)   /* GObj thread processes */
+/* Bumped from 64KB (2026-08-20): a GObj task-manager thread compiling a
+ * shader via glLinkProgram -> shark_compile_shader_extended() reliably hit
+ * "Shader Compiler: E] fatal internal error on line -1." from SceShaccCg on
+ * real hardware, immediately followed by a data abort inside SceGxm - never
+ * a normal source-level compile error, and unaffected by fixing a real
+ * mod()/fmod() semantics bug in vitaGL's GLSL translator (see
+ * vitadb-deps/vitaGL-nosplash's glsl_translator_hdr.h and this repo's
+ * build/shader_debug/ notes), meaning the shader source itself wasn't the
+ * problem. SceShaccCg's own docs note it does NOT copy its input strings -
+ * they must stay valid for the whole compile call - and a full shader
+ * compiler pass (parsing + codegen for the whole vitaGL preamble plus the
+ * user shader) is a plausible way to exceed 64KB of stack, corrupting
+ * either the compiler's own state or the nearby source string it's still
+ * reading from. Matches this thread's stack size to PORT_STACK_SERVICE's
+ * 256KB as a first test; revert to something smaller than 256KB only if
+ * this is confirmed to fix it and per-GObj memory cost matters enough to
+ * tune down. */
+#define PORT_STACK_GOBJ     (256 * 1024)  /* GObj thread processes */
 
 /* ---- Thread registry ----
  * Tracks all service threads (ID < 100) so PortPushFrame can resume them.
@@ -76,6 +93,20 @@ static s32 sResumeDebugCount = 0;
  * that have messages waiting in their blocked queues. */
 void port_resume_service_threads(void)
 {
+	/* Temporary unconditional heartbeat (2026-08-19 hang investigation):
+	 * the verbose debug logging below is self-limited to the first few
+	 * calls by design (avoids infinite per-frame spam), so its silence
+	 * doesn't mean the frame loop stopped - this print isn't gated on
+	 * anything, so its absence (or presence) actually distinguishes
+	 * "still calling this every frame" from "genuinely stuck." Remove
+	 * once resolved. */
+	{
+		static s32 sHeartbeatCount = 0;
+		if ((sHeartbeatCount % 30) == 0) {
+			port_log("SSB64: HEARTBEAT port_resume_service_threads call #%d\n", (int)sHeartbeatCount);
+		}
+		sHeartbeatCount++;
+	}
 	if (sResumeDebugCount < 3) {
 		port_log( "SSB64: port_resume_service_threads: %d threads registered\n",
 		        (int)sServiceThreadCount);

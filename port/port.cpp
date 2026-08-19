@@ -27,6 +27,10 @@
 #ifdef __vita__
 #include <malloc.h>
 #include <unistd.h>
+/* Matches gfx_opengl.h's own #else branch (USE_OPENGLES isn't defined for
+ * this Makefile.vita build, so that's the one actually active here). */
+#define GL_GLEXT_PROTOTYPES 1
+#include <SDL2/SDL_opengl.h>
 #endif
 
 #include "resource/ResourceType.h"
@@ -1405,6 +1409,44 @@ int main(int argc, char* argv[]) {
 		// Diagnostic log from the coroutine-crash investigation (now fixed
 		// via SceFiber, see coroutine_vita.cpp) - kept for a future recap.
 		// port_log("SSB64: DIAG vsnprintf pre-warm done\n");
+	}
+
+	/* Same lazy-first-use pattern one more time, this time for VitaSDK's
+	 * runtime shader compiler (SceShaccCg, reached via vitaGL's
+	 * glCompileShader/glLinkProgram). Real-hardware testing found the
+	 * first-ever glLinkProgram() call made from inside a game-object
+	 * coroutine reliably fails with "Shader Compiler: E] fatal internal
+	 * error on line -1." (confirmed via a synchronous diagnostic added to
+	 * vitaGL's compile_shader() - both the vertex AND fragment half of the
+	 * pair failed, and the actual GLSL source involved was ruled out first:
+	 * neither a genuine mod()/fmod() vector-scalar bug nor an unused
+	 * sampler2D-typed dead function - both real, both fixed independently -
+	 * changed this outcome). The two shaders that reliably succeed earlier
+	 * in boot are ImGui's built-in ones, compiled on the real thread before
+	 * PortGameInit() creates any coroutine - this is the same class of bug
+	 * as malloc/memalign/vsnprintf above, just for the shader compiler's
+	 * own one-time lazy setup instead of a kernel lock. Compile and link a
+	 * trivial throwaway program here, on the real thread, to force that
+	 * setup to happen somewhere safe before any coroutine exists. */
+	{
+		const char *warmVs = "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }";
+		const char *warmFs = "void main() { gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); }";
+		GLuint warmVsId = glCreateShader(GL_VERTEX_SHADER);
+		glShaderSource(warmVsId, 1, &warmVs, NULL);
+		glCompileShader(warmVsId);
+		GLuint warmFsId = glCreateShader(GL_FRAGMENT_SHADER);
+		glShaderSource(warmFsId, 1, &warmFs, NULL);
+		glCompileShader(warmFsId);
+		GLuint warmProg = glCreateProgram();
+		glAttachShader(warmProg, warmVsId);
+		glAttachShader(warmProg, warmFsId);
+		glLinkProgram(warmProg);
+		GLint warmLinked = 0;
+		glGetProgramiv(warmProg, GL_LINK_STATUS, &warmLinked);
+		port_log("SSB64: shader compiler pre-warm done (linked=%d)\n", (int)warmLinked);
+		glDeleteProgram(warmProg);
+		glDeleteShader(warmVsId);
+		glDeleteShader(warmFsId);
 	}
 #endif
 
