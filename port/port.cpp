@@ -1483,6 +1483,23 @@ int main(int argc, char* argv[]) {
 			}
 		}
 	}
+
+	/* Same real-thread/coroutine split as the pre-fetch above, for a
+	 * different allocation: parsing these same audio blobs (later, from
+	 * inside the coroutine) grows BankParser's offset cache one insertion
+	 * at a time, and std::unordered_map's own internal rehash is the same
+	 * "fresh large allocation, non-prewarmable, fatal from the coroutine"
+	 * class of crash. The crash this was meant to address was originally
+	 * attributed to __udivsi3 / _M_insert_bucket_begin via vita-parse-core's
+	 * inline disassembly labels; an independent nm/addr2line cross-check
+	 * later showed both labels were wrong (nearest-preceding-symbol
+	 * mislabeling, not the actual function) - so treat the mechanism here
+	 * as "a real allocation this pre-reserve genuinely removes," not as a
+	 * confirmed root cause for any specific past crash address. Applying
+	 * this fix did empirically move the observed crash further along in
+	 * boot on real hardware, which is the only evidence trusted for it. See
+	 * audio_bridge.cpp's BankParser::cache comment. */
+	portAudioBridgePrewarm();
 #endif
 
 #if defined(__ANDROID__)

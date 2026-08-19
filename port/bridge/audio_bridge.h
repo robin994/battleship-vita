@@ -20,6 +20,16 @@ extern "C" {
 void portAudioLoadAssets(void);
 
 /**
+ * Reserves capacity in BankParser's shared offset->pointer cache up front,
+ * so parsing never triggers a mid-parse bucket-array reallocation. Matters
+ * specifically on Vita (call once from main(), on the real thread, after
+ * PortInit() and before PortGameInit() creates the game coroutine - see
+ * port.cpp's call site and audio_bridge.cpp's BankParser::cache comment for
+ * why), but harmless to call anywhere.
+ */
+void portAudioBridgePrewarm(void);
+
+/**
  * Release shared_ptr<Ship::IResource> references held by the audio bridge's
  * BLOB table.  Must run before Ship::Context is torn down — otherwise those
  * references survive into __cxa_finalize_ranges and the resulting

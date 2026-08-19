@@ -28,6 +28,7 @@
 // We include the port bridge header with C linkage
 extern "C" {
 #include "bridge/audio_bridge.h"
+#include "port_log.h"
 }
 
 // Forward-declare decomp types and functions we need.
@@ -265,6 +266,24 @@ static AudioBlob sounds1_ctl, sounds1_tbl, sounds2_ctl, sounds2_tbl;
 static AudioBlob music_sbk;
 static AudioBlob fgm_unk_blob, fgm_tbl_blob, fgm_ucd_blob;
 
+// See BankParser::cache's comment and portAudioBridgePrewarm() below.
+static std::unordered_map<u32, void*> sBankParserCache;
+
+void portAudioBridgePrewarm(void) {
+    /* Called from main(), on the real thread, before PortGameInit() ever
+     * creates the game coroutine - see the call site in port.cpp for the
+     * full explanation (same pattern as that file's audio-asset pre-fetch).
+     * reserve() forces std::unordered_map's bucket-array allocation to
+     * happen right here rather than lazily on the coroutine's first
+     * cache[off]=ptr insertion. 4096 buckets is a generous multiple of the
+     * largest bank file seen in testing's actual entry count - if a much
+     * larger bank ever needs more than this, unordered_map still rehashes
+     * safely, just via the crash-prone path this exists to avoid; treat a
+     * bump here as the fix if that's ever observed. */
+    sBankParserCache.reserve(4096);
+    port_log("SSB64: DIAG BankParser cache pre-warm done (reserve=4096 buckets)\n");
+}
+
 static bool loadBlob(const char* name, AudioBlob& out) {
     auto ctx = Ship::Context::GetInstance();
     if (!ctx) { spdlog::error("audio_bridge: no Ship::Context"); return false; }
@@ -311,8 +330,27 @@ class BankParser {
     u8*        tbl;
     ALHeap*    heap;
 
-    // Cache: ROM offset in CTL → already-parsed PC pointer
-    std::unordered_map<u32, void*> cache;
+    /* Cache: ROM offset in CTL → already-parsed PC pointer.
+     *
+     * Reference, not an owned member: portAudioLoadAssets() constructs a
+     * BankParser from inside the game coroutine, and this cache grows via
+     * repeated cache[off]=ptr insertions while parsing - each rehash
+     * std::unordered_map does internally to grow its bucket array is a
+     * fresh, non-prewarmable large allocation (same newlib mmap_chunk()
+     * class of crash as O2rArchive.cpp's LoadFile() scratch buffer and
+     * port.cpp's audio pre-fetch). The crash this was meant to address was
+     * originally attributed to a specific call chain (__udivsi3 called from
+     * _M_insert_bucket_begin) via vita-parse-core's inline disassembly
+     * labels; an independent nm/addr2line cross-check later showed both of
+     * those labels were nearest-preceding-symbol mislabels, not the actual
+     * functions - so this reference-and-preallocate change is justified by
+     * the general "no fresh large allocation from the coroutine" rule and
+     * by empirically moving the observed crash further along in boot, not
+     * by that specific (wrong) symbol trail. Taking an external reference
+     * lets the caller supply a bucket array already reserve()'d to a safe
+     * capacity on the real thread, before any coroutine exists - see
+     * portAudioLoadAssets()'s sBankParserCache. */
+    std::unordered_map<u32, void*>& cache;
 
     template<typename T>
     T* cached(u32 off, T* ptr) { cache[off] = ptr; return ptr; }
@@ -323,8 +361,8 @@ class BankParser {
     }
 
 public:
-    BankParser(const u8* c, size_t cs, u8* t, ALHeap* h)
-        : ctl(c), ctlSize(cs), tbl(t), heap(h) {}
+    BankParser(const u8* c, size_t cs, u8* t, ALHeap* h, std::unordered_map<u32, void*>& cacheRef)
+        : ctl(c), ctlSize(cs), tbl(t), heap(h), cache(cacheRef) {}
 
     ALEnvelope* parseEnvelope(u32 off) {
         if (auto* p = (ALEnvelope*)lookup(off)) return p;
@@ -623,14 +661,22 @@ extern "C" void portAudioLoadAssets(void)
     // music CSP a single-instrument 322-sound table with degenerate keymaps,
     // and every NoteOn misses in __n_lookupSoundQuick → silent BGM.
     {
-        BankParser parser(sounds1_ctl.data, sounds1_ctl.size, tbl1, &sSYAudioHeap);
+        // sBankParserCache (file scope below) is shared across both parser
+        // instances - see BankParser::cache's comment. Cleared between them
+        // since offsets are only meaningful within the CTL file they came
+        // from, but clear() doesn't release the bucket array
+        // portAudioBridgePrewarm() already reserve()'d, so neither parser's
+        // insertions need a fresh allocation.
+        sBankParserCache.clear();
+        BankParser parser(sounds1_ctl.data, sounds1_ctl.size, tbl1, &sSYAudioHeap, sBankParserCache);
         ALBankFile* bf = parser.parseBankFile();
         sSYAudioSequenceBank2 = bf->bankArray[0];
         spdlog::info("audio_bridge: parsed sounds1_ctl → sSYAudioSequenceBank2 (music): {} instruments, rate={}",
                      sSYAudioSequenceBank2->instCount, sSYAudioSequenceBank2->sampleRate);
     }
     {
-        BankParser parser(sounds2_ctl.data, sounds2_ctl.size, tbl2, &sSYAudioHeap);
+        sBankParserCache.clear();
+        BankParser parser(sounds2_ctl.data, sounds2_ctl.size, tbl2, &sSYAudioHeap, sBankParserCache);
         ALBankFile* bf = parser.parseBankFile();
         sSYAudioSequenceBank1 = bf->bankArray[0];
         spdlog::info("audio_bridge: parsed sounds2_ctl → sSYAudioSequenceBank1 (SFX): {} instruments, rate={}",
