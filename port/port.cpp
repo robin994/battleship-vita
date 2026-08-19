@@ -1332,7 +1332,10 @@ int main(int argc, char* argv[]) {
 	{
 		int r1 = mallopt(M_MMAP_MAX, 0);
 		int r2 = mallopt(M_MMAP_THRESHOLD, 256 * 1024 * 1024);
-		port_log("SSB64: DIAG mallopt(M_MMAP_MAX,0)=%d mallopt(M_MMAP_THRESHOLD,256MiB)=%d\n", r1, r2);
+		(void)r1; (void)r2;
+		// Diagnostic log from the coroutine-crash investigation (now fixed
+		// via SceFiber, see coroutine_vita.cpp) - kept for a future recap.
+		// port_log("SSB64: DIAG mallopt(M_MMAP_MAX,0)=%d mallopt(M_MMAP_THRESHOLD,256MiB)=%d\n", r1, r2);
 	}
 
 	/* Same lazy-first-use-kernel-object pattern already found and fixed
@@ -1353,7 +1356,9 @@ int main(int argc, char* argv[]) {
 		if (warm != NULL) {
 			free(warm);
 		}
-		port_log("SSB64: DIAG malloc pre-warm done (forces lazy lock creation off the coroutine stack)\n");
+		// Diagnostic log from the coroutine-crash investigation (now fixed
+		// via SceFiber, see coroutine_vita.cpp) - kept for a future recap.
+		// port_log("SSB64: DIAG malloc pre-warm done (forces lazy lock creation off the coroutine stack)\n");
 	}
 
 	/* Same reasoning, but for memalign() specifically: PortGameInit() calls
@@ -1377,7 +1382,9 @@ int main(int argc, char* argv[]) {
 		if (warm != NULL) {
 			free(warm);
 		}
-		port_log("SSB64: DIAG memalign pre-warm done (1MiB, page-aligned)\n");
+		// Diagnostic log from the coroutine-crash investigation (now fixed
+		// via SceFiber, see coroutine_vita.cpp) - kept for a future recap.
+		// port_log("SSB64: DIAG memalign pre-warm done (1MiB, page-aligned)\n");
 	}
 
 	/* Same lazy-first-use-kernel-object pattern again, this time for
@@ -1395,7 +1402,9 @@ int main(int argc, char* argv[]) {
 	{
 		char warmBuf[16];
 		std::snprintf(warmBuf, sizeof(warmBuf), "%d", 1);
-		port_log("SSB64: DIAG vsnprintf pre-warm done\n");
+		// Diagnostic log from the coroutine-crash investigation (now fixed
+		// via SceFiber, see coroutine_vita.cpp) - kept for a future recap.
+		// port_log("SSB64: DIAG vsnprintf pre-warm done\n");
 	}
 #endif
 
@@ -1479,7 +1488,11 @@ int main(int argc, char* argv[]) {
 			};
 			for (const char* path : kAudioPreloadPaths) {
 				auto res = rm->LoadResource(path);
-				port_log("SSB64: DIAG audio pre-fetch %s -> %s\n", path, res ? "ok" : "FAILED");
+				(void)res;
+				// Diagnostic log from the coroutine-crash investigation (now
+				// fixed via SceFiber, see coroutine_vita.cpp) - kept for a
+				// future recap.
+				// port_log("SSB64: DIAG audio pre-fetch %s -> %s\n", path, res ? "ok" : "FAILED");
 			}
 		}
 	}

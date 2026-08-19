@@ -193,6 +193,12 @@ void osStartThread(OSThread *t)
 	/* Create the coroutine lazily on first start. */
 	if (t->port_coroutine == NULL && t->port_entry != NULL) {
 		size_t stack_size = (t->id < 100) ? PORT_STACK_SERVICE : PORT_STACK_GOBJ;
+		/* Temporarily re-enabled (2026-08-19 hang investigation): need to
+		 * see whether a NESTED port_coroutine_create/resume - one thread's
+		 * own coroutine synchronously starting another - actually completes
+		 * under SceFiber, since that's exactly where boot now stalls with
+		 * no crash and no coredump. Re-silence once resolved (see the
+		 * matching comment this replaced for the general pattern). */
 		port_log("SSB64: DIAG osStartThread id=%d before port_coroutine_create (stack_size=%u)\n",
 		         (int)t->id, (unsigned)stack_size);
 		t->port_coroutine = port_coroutine_create(t->port_entry, t->port_arg, stack_size);
@@ -208,6 +214,7 @@ void osStartThread(OSThread *t)
 	 * osRecvMesg BLOCK or osStopThread) then return here. */
 	if (t->port_coroutine != NULL) {
 		t->state = OS_STATE_RUNNING;
+		/* Temporarily re-enabled, see the matching comment above. */
 		port_log("SSB64: DIAG osStartThread id=%d before port_coroutine_resume\n", (int)t->id);
 		port_coroutine_resume((PortCoroutine *)t->port_coroutine);
 		port_log("SSB64: DIAG osStartThread id=%d after port_coroutine_resume\n", (int)t->id);

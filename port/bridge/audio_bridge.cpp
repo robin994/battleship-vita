@@ -281,7 +281,9 @@ void portAudioBridgePrewarm(void) {
      * safely, just via the crash-prone path this exists to avoid; treat a
      * bump here as the fix if that's ever observed. */
     sBankParserCache.reserve(4096);
-    port_log("SSB64: DIAG BankParser cache pre-warm done (reserve=4096 buckets)\n");
+    // Diagnostic log from the coroutine-crash investigation (now fixed via
+    // SceFiber, see coroutine_vita.cpp) - kept for a future recap.
+    // port_log("SSB64: DIAG BankParser cache pre-warm done (reserve=4096 buckets)\n");
 }
 
 static bool loadBlob(const char* name, AudioBlob& out) {

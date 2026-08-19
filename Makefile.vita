@@ -98,17 +98,29 @@ INCLUDES := $(LUS_INCLUDES) $(TORCH_INCLUDES) $(GAME_INCLUDES)
 # homebrew. Same core set as every other libultraship/Shipwright Vita port
 # (Ghostship, SpaghettiKart, 2ship2harkinian).
 #
-# vitaGL-nosplash instead of VitaSDK's stock libvitaGL.a: skips the vitaGL
-# boot splashscreen. Unlike NeoVitaDB-Downloader (whose codebase predates
-# vglDrawObjects' current 2-arg signature and doesn't render with this
-# variant), gfx_opengl.cpp here never calls vglDrawObjects directly and
-# both headers already agree on the 2-arg signature, so the API-mismatch
-# regression documented for that project doesn't apply. Still unverified
-# on real Vita hardware for BattleShip specifically - revert to the
-# stock -L path (drop this line) if rendering breaks.
-VITAGL_NOSPLASH_DIR := /Users/robin994/.local/opt/vitadb-deps/vitaGL-nosplash
+# vitaGL-nosplash (skips the boot splashscreen): first attempt compiled fine
+# but a real-hardware coredump showed a data abort inside SceGxm, called from
+# glLinkProgram - the first genuine graphics-pipeline crash reached only
+# once the SceFiber coroutine migration (see coroutine_vita.cpp) got boot
+# far enough to actually start rendering. Swapping to vitaGL-fresh (stock/
+# unpatched, no nosplash patch) didn't crash but hung instead - the frame
+# loop's thread round-robin froze mid-resume with no coredump (a real
+# deadlock, not a fault). Root cause turned out to be in vitaGL-nosplash's
+# own source, not which variant is linked: source/gxm.c's garbage-collector
+# thread setup checks `#ifdef HAVE_PTRHEAD` (transposed letters) instead of
+# HAVE_PTHREAD, so passing HAVE_PTHREAD=1 at build time silently never took
+# effect and the GC thread always fell back to a raw sceKernelCreateThread
+# - a real, cross-thread synchronization difference from what the flag
+# claimed to configure. Fixed the typo (and the missing #include <pthread.h>
+# it had been masking - that branch had never actually compiled before) in
+# the vendored vitaGL-nosplash/source/gxm.c and rebuilt with
+# HAVE_PTHREAD=1 LOG_ERRORS=1 HAVE_GLSL_TEXTURE_SIZE=1 INDICES_SPEEDHACK=1
+# NO_SPLASHSCREEN=1 (matches this file's own vitaGL rebuild recipe further
+# down). Back on vitaGL-nosplash with that fix in place to test whether it
+# resolves both the crash and the hang.
+VITAGL_DIR := /Users/robin994/.local/opt/vitadb-deps/vitaGL-nosplash
 
-LIBS = -L$(VITAGL_NOSPLASH_DIR) -lzip -lbz2 -lzstd -lz -lyaml-cpp -llzma -lssl -lcrypto -lstdc++ -lpng \
+LIBS = -L$(VITAGL_DIR) -lzip -lbz2 -lzstd -lz -lyaml-cpp -llzma -lssl -lcrypto -lstdc++ -lpng \
 	-Wl,--whole-archive -lpthread -Wl,--no-whole-archive \
 	-ltinyxml2 -lSDL2 -lvorbisfile -lvorbis -logg -lvitaGL -lvitashark -lSceShaccCgExt -ltaihen_stub -lmathneon -lSceAudioIn_stub \
 	-lSceIme_stub -lSceKernelDmacMgr_stub -lSceGxm_stub -lSceDisplay_stub -lSceTouch_stub -lSceHid_stub -lSceCtrl_stub -lSceNet_stub \
@@ -225,7 +237,7 @@ CC  = $(PREFIX)-gcc
 CXX = $(PREFIX)-g++
 
 CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-short-enums -fsigned-char \
-	-I$(VITAGL_NOSPLASH_DIR)/source \
+	-I$(VITAGL_DIR)/source \
 	$(foreach dir,$(INCLUDES),-I$(dir)) -fno-strict-aliasing -DMA_NO_RUNTIME_LINKING \
 	-DNDEBUG \
 	-Wno-narrowing -DIMGUI_IMPL_OPENGL_ES2 -DSPDLOG_ACTIVE_LEVEL=2 -DFMT_HEADER_ONLY \
