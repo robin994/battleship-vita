@@ -118,7 +118,10 @@ INCLUDES := $(LUS_INCLUDES) $(TORCH_INCLUDES) $(GAME_INCLUDES)
 # NO_SPLASHSCREEN=1 (matches this file's own vitaGL rebuild recipe further
 # down). Back on vitaGL-nosplash with that fix in place to test whether it
 # resolves both the crash and the hang.
-VITAGL_DIR := /Users/robin994/.local/opt/vitadb-deps/vitaGL-nosplash
+# Overridable so CI (which has no access to this maintainer's local vendored
+# checkout) can point it at a freshly-built vitaGL instead; local builds are
+# unaffected since ?= only takes effect when VITAGL_DIR isn't already set.
+VITAGL_DIR ?= /Users/robin994/.local/opt/vitadb-deps/vitaGL-nosplash
 
 LIBS = -L$(VITAGL_DIR) -lzip -lbz2 -lzstd -lz -lyaml-cpp -llzma -lssl -lcrypto -lstdc++ -lpng \
 	-Wl,--whole-archive -lpthread -Wl,--no-whole-archive \

@@ -1,0 +1,174 @@
+name: Vita VPK Build
+
+# Builds the actual PS Vita package (build/battleship.vpk) via Makefile.vita,
+# independent of build.yml/release.yml (desktop Win/Linux/macOS, currently
+# disabled). Runs in the vitasdk/vitasdk container image, which ships VitaSDK
+# itself plus vdpm and (in the default "full" tag) the whole vdpm package
+# catalogue pre-installed. Three link-time dependencies Makefile.vita needs
+# aren't vdpm packages at all (zstd, tinyxml2, SceShaccCgExt) and vitaGL needs
+# a locally-patched rebuild (see the vitaGL step below) rather than any
+# packaged version, so all four are built from source here before the actual
+# project build runs.
+#
+# workflow_dispatch only for now, plus push scoped to paths that actually
+# touch the Vita build inputs -- this project's other CI is disabled
+# specifically because broad push triggers were spamming failure emails while
+# the Vita port work dominates pushes to this branch; keep this one narrow.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "Makefile.vita"
+      - "port/**"
+      - "decomp"
+      - "decomp/**"
+      - "torch"
+      - "torch/**"
+      - "libultraship"
+      - "libultraship/**"
+      - "livearea/**"
+      - ".github/workflows/vita-vpk-build.yml"
+
+permissions:
+  contents: read
+
+# A fresh push cancels a previous, still-running build for the same ref --
+# matches build.yml's convention, no point burning runner minutes on a stale
+# commit.
+concurrency:
+  group: vita-vpk-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-vpk:
+    name: Build battleship.vpk
+    runs-on: ubuntu-latest
+    container:
+      image: vitasdk/vitasdk:latest
+    # Full from-scratch decomp + libultraship + torch compile (~3000 TUs);
+    # generous ceiling so a slow runner doesn't get killed mid-build.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Trust the checked-out worktree
+        # actions/checkout runs as root inside this container; some git
+        # versions refuse to operate on a directory owned by a different
+        # uid than the one that cloned it ("dubious ownership"). Everything
+        # here is root, but this is a cheap, harmless guard.
+        run: git config --global --add safe.directory '*'
+
+      - name: Install extra host packages
+        # zip: Makefile.vita's build/f3d.o2r rule zips
+        # libultraship/src/fast/shaders itself; not part of the base image.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends zip
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Ensure vdpm target packages are installed
+        # vitasdk/vitasdk:latest is the "full" variant, which already vdpm-
+        # installs its entire package catalogue at image-build time, so this
+        # is normally a no-op (vdpm install defaults to --needed). Kept
+        # explicit so this workflow doesn't silently rely on that image
+        # detail and still works if the default tag ever changes meaning.
+        run: |
+          VDPM_NONINTERACTIVE=1 vdpm install \
+            bzip2 curl libmathneon libogg libpng libvorbis libzip \
+            openssl sdl2 taihen xz yaml-cpp zlib vitaShaRK
+
+      - name: Build SceShaccCgExt
+        # Companion lib to vitaShaRK (Vita-specific Cg extensions/intrinsics),
+        # not published as its own vdpm package. Standard VitaSDK CMake
+        # cross-build; its CMakeLists.txt installs the static lib + header
+        # under $VITASDK/arm-vita-eabi automatically via vita.toolchain.cmake,
+        # so no explicit -I/-L is needed at battleship's own link step --
+        # matches how every other vdpm-provided lib in Makefile.vita's LIBS
+        # is referenced by bare -l flag.
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/Rinnegatamante/SceShaccCgExt /tmp/SceShaccCgExt
+          cmake -S /tmp/SceShaccCgExt -B /tmp/SceShaccCgExt/build \
+            -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/SceShaccCgExt/build -j"$(nproc)"
+          cmake --install /tmp/SceShaccCgExt/build
+
+      - name: Build tinyxml2
+        # Not a vdpm package either. Plain upstream CMake project; disable
+        # its test executable (xmltest) since that would try to build a
+        # freestanding Vita binary we have no way to run/link standalone.
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/leethomason/tinyxml2 /tmp/tinyxml2
+          cmake -S /tmp/tinyxml2 -B /tmp/tinyxml2/build \
+            -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF -Dtinyxml2_BUILD_TESTING=OFF
+          cmake --build /tmp/tinyxml2/build -j"$(nproc)"
+          cmake --install /tmp/tinyxml2/build
+
+      - name: Build zstd (static lib)
+        # Also not a vdpm package. zstd's own lib/Makefile cross-compiles
+        # cleanly with CC/AR overridden to the Vita toolchain; the static
+        # target already defaults to single-threaded (no -pthread/-lpthread
+        # pulled in), so no extra flags are needed. Installed by hand into
+        # $VITASDK/arm-vita-eabi to match every other dependency's layout.
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/facebook/zstd /tmp/zstd
+          make -C /tmp/zstd/lib libzstd.a -j"$(nproc)" \
+            CC=arm-vita-eabi-gcc AR=arm-vita-eabi-gcc-ar
+          install -d "$VITASDK/arm-vita-eabi/include" "$VITASDK/arm-vita-eabi/lib"
+          install -m 644 /tmp/zstd/lib/zstd.h "$VITASDK/arm-vita-eabi/include/zstd.h"
+          install -m 644 /tmp/zstd/lib/libzstd.a "$VITASDK/arm-vita-eabi/lib/libzstd.a"
+
+      - name: Build vitaGL (patched)
+        # Rinnegatamante/vitaGL master as of writing has a real bug: gxm.c's
+        # GC-thread setup checks '#ifdef HAVE_PTRHEAD' (letters transposed)
+        # instead of HAVE_PTHREAD, so HAVE_PTHREAD=1 silently never takes
+        # effect, and that dead branch was also never actually compiled
+        # before, so it's separately missing '#include <pthread.h>'. Both are
+        # fixed here before building -- this replicates a fix already applied
+        # locally (never committed to any repo) by the maintainer. The grep
+        # guard fails loudly instead of silently building an unpatched
+        # library if upstream ever changes this.
+        #
+        # Built into a fixed path (not $VITASDK) because Makefile.vita
+        # expects a source-checkout layout: -I$(VITAGL_DIR)/source for
+        # headers, -L$(VITAGL_DIR) for the .a make leaves at the repo root --
+        # not an installed prefix, so there's no `make install` step here.
+        run: |
+          set -euo pipefail
+          VITAGL_DIR=/opt/vitaGL
+          git clone --depth 1 https://github.com/Rinnegatamante/vitaGL "$VITAGL_DIR"
+          grep -q 'HAVE_PTRHEAD' "$VITAGL_DIR/source/gxm.c" || { echo "vitaGL upstream source/gxm.c no longer contains the expected HAVE_PTRHEAD typo -- the known-fix patch needs re-verification against current upstream before this build can be trusted." >&2; exit 1; }
+          sed -i 's/HAVE_PTRHEAD/HAVE_PTHREAD/' "$VITAGL_DIR/source/gxm.c"
+          printf '#ifdef HAVE_PTHREAD\n#include <pthread.h>\n#endif\n' | cat - "$VITAGL_DIR/source/gxm.c" > "$VITAGL_DIR/source/gxm.c.patched"
+          mv "$VITAGL_DIR/source/gxm.c.patched" "$VITAGL_DIR/source/gxm.c"
+          make -C "$VITAGL_DIR" -j"$(nproc)" \
+            HAVE_PTHREAD=1 LOG_ERRORS=1 HAVE_GLSL_TEXTURE_SIZE=1 INDICES_SPEEDHACK=1 NO_SPLASHSCREEN=1
+          echo "VITAGL_DIR=$VITAGL_DIR" >> "$GITHUB_ENV"
+
+      - name: Compile objects
+        run: make -f Makefile.vita objects -j"$(nproc)"
+
+      - name: Prepare (copy build/f/*.o.k -> build/f/*.o)
+        # Not optional -- see Makefile.vita/CLAUDE.md. The linker step reads
+        # build/f/*.o, which only this rule produces.
+        run: make -f Makefile.vita prepare
+
+      - name: Link and package VPK
+        run: make -f Makefile.vita build/battleship.vpk
+
+      - name: Upload battleship.vpk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: battleship-vpk
+          path: build/battleship.vpk
+          if-no-files-found: error
