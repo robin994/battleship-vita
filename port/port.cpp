@@ -1379,6 +1379,24 @@ int main(int argc, char* argv[]) {
 		}
 		port_log("SSB64: DIAG memalign pre-warm done (1MiB, page-aligned)\n");
 	}
+
+	/* Same lazy-first-use-kernel-object pattern again, this time for
+	 * newlib's own vsnprintf: a real-hardware coredump showed the game
+	 * coroutine crashing *inside* newlib's _svfprintf_r (vsnprintf's
+	 * internal implementation) the first time a particular code path
+	 * called it from inside the coroutine - newlib's stdio internals
+	 * apparently carry their own lazily-created lock, same class of bug as
+	 * malloc/memalign above. port_log() and most other logging in this
+	 * codebase were switched to Sony's sceClibVsnprintf instead (bypasses
+	 * newlib's stdio layer entirely), but plain vsnprintf/snprintf calls
+	 * exist scattered across many other files that weren't individually
+	 * audited - warm newlib's vsnprintf here too, on the real stack before
+	 * any coroutine exists, as a general safety net for all of them. */
+	{
+		char warmBuf[16];
+		std::snprintf(warmBuf, sizeof(warmBuf), "%d", 1);
+		port_log("SSB64: DIAG vsnprintf pre-warm done\n");
+	}
 #endif
 
 #ifdef __APPLE__
@@ -1426,6 +1444,46 @@ int main(int argc, char* argv[]) {
 	if (PortInit(argc, argv) != 0) {
 		return 1;
 	}
+
+#ifdef __vita__
+	/* Pre-fetch the audio assets portAudioLoadAssets() (decomp/src/sys/audio.c,
+	 * called from inside the game coroutine as part of the N64 audio
+	 * thread's own boot) will request via loadBlob() - same underlying
+	 * problem as vitaReadScratch's pool above (O2rArchive.cpp): these
+	 * files are large enough (one is ~1 MB uncompressed) to cross newlib
+	 * malloc's mmap_chunk() threshold, which makes a fresh, non-prewarmable
+	 * kernel call on every qualifying allocation - fatal when made from
+	 * the coroutine's manually-swapped stack. Moving portAudioLoadAssets()
+	 * itself earlier isn't safe - it's embedded inside the original N64
+	 * audio thread's entry function, in a specific position relative to
+	 * syAudioInit()/syAudioMakeBGMPlayers() this port shouldn't reorder.
+	 * Instead, exploit ResourceManager's own path-keyed cache
+	 * (ResourceManager.cpp's mResourceCache): loading the exact same
+	 * "__OTR__..." paths here, synchronously, on main()'s real stack,
+	 * populates that cache: - large allocation happens somewhere the
+	 * kernel call is safe. When loadBlob() later calls LoadResource() for
+	 * the identical path from inside the coroutine, it's a cache hit -
+	 * no fresh allocation, no zip_fread, no zlib call at all. Every path
+	 * here must exactly match loadBlob()'s "__OTR__" + name construction
+	 * (port/bridge/audio_bridge.cpp) or the cache key won't match and
+	 * this pre-fetch is silently wasted. */
+	if (sContext) {
+		auto rm = sContext->GetResourceManager();
+		if (rm) {
+			static const char* kAudioPreloadPaths[] = {
+				"__OTR__audio/B1_sounds1_ctl",
+				"__OTR__audio/B1_sounds1_tbl",
+				"__OTR__audio/B1_sounds2_ctl",
+				"__OTR__audio/B1_sounds2_tbl",
+				"__OTR__audio/S1_music_sbk",
+			};
+			for (const char* path : kAudioPreloadPaths) {
+				auto res = rm->LoadResource(path);
+				port_log("SSB64: DIAG audio pre-fetch %s -> %s\n", path, res ? "ok" : "FAILED");
+			}
+		}
+	}
+#endif
 
 #if defined(__ANDROID__)
 	// === Android JNI cache warm-up ===

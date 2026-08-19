@@ -587,8 +587,18 @@ extern "C" void portAudioLoadAssets(void)
     // for the entire session (wavetable base pointers reference TBL data
     // directly, FGM packages reference their data, etc.)
     bool ok = true;
-    ok = ok && loadBlob("audio/B1_sounds1_ctl", sounds1_ctl);
+    /* TEMPORARY DIAGNOSTIC: load order swapped (tbl before ctl) to test
+     * whether the recurring crc32_z crash follows "whichever resource is
+     * first loaded from inside the coroutine" (order-dependent, pointing at
+     * a structural/environmental cause) or stays tied to
+     * audio/B1_sounds1_ctl specifically (content/size-dependent) - a real
+     * hardware statistical study (10 runs, see docs/bugs/) confirmed the
+     * crash happens on the first coroutine-context resource load, several
+     * of which are already ruled out (not "version", not archive-buffer
+     * corruption, not this file's own zip_fread/zip_fclose cycle when
+     * loaded on the real thread) - this is the next bisection step. */
     ok = ok && loadBlob("audio/B1_sounds1_tbl", sounds1_tbl);
+    ok = ok && loadBlob("audio/B1_sounds1_ctl", sounds1_ctl);
     ok = ok && loadBlob("audio/B1_sounds2_ctl", sounds2_ctl);
     ok = ok && loadBlob("audio/B1_sounds2_tbl", sounds2_tbl);
     ok = ok && loadBlob("audio/S1_music_sbk",   music_sbk);

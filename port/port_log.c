@@ -215,7 +215,23 @@ void port_log(const char *fmt, ...)
 	char formatted[LOG_LINE_MAX];
 	va_list ap;
 	va_start(ap, fmt);
+	/* sceClibVsnprintf, not newlib's vsnprintf: a real-hardware crash landed
+	 * inside newlib's _svfprintf_r when a different call site (O2rArchive's
+	 * diagnostic logging) used vsnprintf from inside the game coroutine -
+	 * matching this project's established pattern of newlib internals
+	 * carrying their own lazily-created, coroutine-unsafe kernel locks (see
+	 * the wiki's "manually-swapped stacks" finding). port_log() is called
+	 * from many places throughout boot, including from inside the
+	 * coroutine, so it's exposed to the same risk even though it hasn't
+	 * been directly observed crashing here - Sony's sceClibVsnprintf
+	 * bypasses newlib's stdio layer entirely, consistent with this file's
+	 * own established "avoid newlib stdio" approach for the actual
+	 * file/console writes below. */
+#ifdef __vita__
+	sceClibVsnprintf(formatted, sizeof(formatted), fmt, ap);
+#else
 	vsnprintf(formatted, sizeof(formatted), fmt, ap);
+#endif
 	va_end(ap);
 
 #ifdef __vita__
