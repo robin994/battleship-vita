@@ -113,7 +113,7 @@ LIBS = -L$(VITAGL_NOSPLASH_DIR) -lzip -lbz2 -lzstd -lz -lyaml-cpp -llzma -lssl -
 	-ltinyxml2 -lSDL2 -lvorbisfile -lvorbis -logg -lvitaGL -lvitashark -lSceShaccCgExt -ltaihen_stub -lmathneon -lSceAudioIn_stub \
 	-lSceIme_stub -lSceKernelDmacMgr_stub -lSceGxm_stub -lSceDisplay_stub -lSceTouch_stub -lSceHid_stub -lSceCtrl_stub -lSceNet_stub \
 	-lSceNetCtl_stub -lSceCommonDialog_stub -lSceAudio_stub -lSceSysmodule_stub -lSceMotion_stub -lSceAppUtil_stub \
-	-lSceAppMgr_stub -lSceShaccCg_stub -lScePower_stub
+	-lSceAppMgr_stub -lSceShaccCg_stub -lScePower_stub -lSceFiber_stub
 
 FINAL_SOURCES := build/f
 
@@ -139,10 +139,16 @@ CFILES := $(filter-out %.inc.c, $(CFILES))
 # his actual fork, not a reimplementation from the generic backend.
 #
 # coroutine_posix.cpp/coroutine_win32.cpp/coroutine_test.cpp: other platforms'
-# coroutine backends (Vita uses coroutine_android.cpp, extended to also cover
-# __vita__ - it's already a bare AAPCS32 asm context switch, the right fit for
-# a console with no ucontext.h). port_watchdog.cpp needs the same POSIX
-# ucontext signal API; port_watchdog_vita.cpp above is its no-op Vita stub.
+# coroutine backends. coroutine_android.cpp is ALSO excluded here even though
+# its #if guard covers __vita__: that was the original hand-rolled
+# memalign()+raw-ARM-assembly-SP-swap backend, replaced by coroutine_vita.cpp
+# (built on the official SceFiber API) after real-hardware testing confirmed
+# any kernel syscall made from that manually-swapped stack crashes (never
+# registered with the kernel as a real thread stack - see coroutine_vita.cpp's
+# header comment and the wiki's "manually-swapped stacks" finding). Left
+# unexcluded, both files would define port_coroutine_create() etc. and fail
+# to link. port_watchdog.cpp needs the POSIX ucontext signal API VitaSDK
+# doesn't have; port_watchdog_vita.cpp above is its no-op Vita stub.
 # Updater/DiscordRichPresence/ShaderDownloader/port_window_icon: excluded the
 # same way upstream already excludes them for Android (CMakeLists.txt's
 # CMAKE_SYSTEM_NAME STREQUAL "Android" block) - no curl self-updater, no
@@ -169,14 +175,14 @@ CFILES := $(filter-out %.inc.c, $(CFILES))
 # 2107 real entries, so every reloc file_id >= 2107 read past the end of
 # that array into zeroed memory and came back NULL.
 CPPFILES := $(filter-out %/gfx_direct3d11.cpp %/gfx_direct3d_common.cpp %/gfx_dxgi.cpp %/gfx_metal.cpp %/gfx_metal_shader.cpp %/Fast3dGui.cpp \
-	%/coroutine_posix.cpp %/coroutine_win32.cpp %/coroutine_test.cpp %/port_watchdog.cpp \
+	%/coroutine_posix.cpp %/coroutine_win32.cpp %/coroutine_test.cpp %/coroutine_android.cpp %/port_watchdog.cpp \
 	%/Updater.cpp %/DiscordRichPresence.cpp %/ShaderDownloader.cpp %/port_window_icon.cpp \
 	%/renderdoc_trigger.cpp %/RelocFileTable.jp.cpp, $(CPPFILES))
 
-# ARM AAPCS32 coroutine context-switch shim (matches coroutine_android.cpp's
-# CoroCtx layout for __arm__). Vita is armv7 (Cortex-A9), same ABI as
-# armeabi-v7a Android, so this file needs no changes.
-SFILES := port/coroutine_armv7.S
+# No .S coroutine context-switch shim on Vita anymore - coroutine_vita.cpp
+# (globbed in via port/*.cpp above) drives the official SceFiber API instead
+# of a hand-rolled asm register swap. See its header comment for why.
+SFILES :=
 
 # decomp/include is scoped to decomp/src's own object files only (matches
 # CMakeLists.txt's ssb64_game vs. main-target include split - see the
