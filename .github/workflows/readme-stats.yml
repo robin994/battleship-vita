@@ -8,8 +8,10 @@ name: README stats
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '23 8 * * *'
+  # schedule (daily cron) disabled during the Vita port: was failing every
+  # day unrelated to any actual change, pure noise. Re-enable once the
+  # underlying failure is fixed, or just run manually when stats need a
+  # refresh.
   release:
     types: [published, edited, deleted]
   push:
