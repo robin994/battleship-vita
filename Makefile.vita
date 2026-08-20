@@ -118,6 +118,23 @@ INCLUDES := $(LUS_INCLUDES) $(TORCH_INCLUDES) $(GAME_INCLUDES)
 # NO_SPLASHSCREEN=1 (matches this file's own vitaGL rebuild recipe further
 # down). Back on vitaGL-nosplash with that fix in place to test whether it
 # resolves both the crash and the hang.
+#
+# 2026-08-20 follow-up: root-caused the "data abort inside SceGxm, called
+# from glLinkProgram" crash above via coredump analysis (vita-parse-core):
+# LR resolved to source/custom_shaders.c's glLinkProgram, right after a
+# shark_compile_shader_extended() call whose failure (NULL prog) was never
+# checked before falling through to set_default_attrib_binding() ->
+# sceGxmProgramGetParameterCount(NULL). Fixed in the vendored (untracked)
+# vitaGL-nosplash/source/custom_shaders.c: glLinkProgram() now bails out
+# gracefully with a vgl_log() instead of dereferencing a NULL SceGxmProgram*.
+# This doesn't fix why SceShaccCg fails to compile the shader in the first
+# place (still unresolved), just converts the resulting native crash into a
+# recoverable glLinkProgram failure. libvitaGL.a was rebuilt with this fix
+# using the same flags as above. NOTE: most boot attempts this session got
+# stuck earlier than this crash anyway - a game thread blocking on
+# osRecvMesg immediately after creation, never observed to unblock within
+# several minutes - so this fix's real-world effect on the observed crash
+# is still unconfirmed; see port/stubs/n64_stubs.c investigation.
 VITAGL_DIR := /Users/robin994/.local/opt/vitadb-deps/vitaGL-nosplash
 
 LIBS = -L$(VITAGL_DIR) -lzip -lbz2 -lzstd -lz -lyaml-cpp -llzma -lssl -lcrypto -lstdc++ -lpng \
