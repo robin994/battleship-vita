@@ -32,6 +32,50 @@
  * this Makefile.vita build, so that's the one actually active here). */
 #define GL_GLEXT_PROTOTYPES 1
 #include <SDL2/SDL_opengl.h>
+
+extern "C" void vglSwapBuffers(GLboolean has_commondialog);
+
+/* The shader prewarm must run before the game archives consume the remaining
+ * compiler heap, but compiling every observed Fast3D program can take minutes
+ * on a real Vita. Present a shader-free progress bar with scissored clears so
+ * the display becomes live immediately and keeps updating during that work.
+ * Restore the scissor state expected by the OpenGL backend before returning. */
+static void VitaPresentShaderWarmupProgress(unsigned int completed, unsigned int total) {
+	constexpr GLint kWidth = 960;
+	constexpr GLint kHeight = 544;
+	constexpr GLint kBarX = 120;
+	constexpr GLint kBarY = 248;
+	constexpr GLsizei kBarWidth = 720;
+	constexpr GLsizei kBarHeight = 48;
+	constexpr GLint kInset = 4;
+
+	glViewport(0, 0, kWidth, kHeight);
+	glDisable(GL_SCISSOR_TEST);
+	glClearColor(0.015f, 0.025f, 0.055f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	glEnable(GL_SCISSOR_TEST);
+	glScissor(kBarX, kBarY, kBarWidth, kBarHeight);
+	glClearColor(0.08f, 0.10f, 0.14f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	GLsizei progressWidth = 0;
+	if (total != 0 && completed != 0) {
+		progressWidth = (GLsizei)(((unsigned long long)(kBarWidth - 2 * kInset) * completed) / total);
+	}
+	if (progressWidth > 0) {
+		glScissor(kBarX + kInset, kBarY + kInset, progressWidth, kBarHeight - 2 * kInset);
+		glClearColor(0.10f, 0.62f, 0.92f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+	}
+
+	/* Fast3D enables scissoring during normal rendering and tracks that state
+	 * internally, so leave GL in the same state rather than invalidating its
+	 * cache before the first game frame. */
+	glScissor(0, 0, kWidth, kHeight);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	vglSwapBuffers(GL_FALSE);
+}
 #endif
 
 #include "resource/ResourceType.h"
@@ -71,6 +115,7 @@
 
 #ifdef __vita__
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/sysmem.h>
 #endif
 
 extern "C" void PortRegisterEvents(void);
@@ -922,6 +967,100 @@ static int PortInitImpl(int argc, char* argv[]) {
 		if (!sContext->InitWindow(window)) { port_log("SSB64: InitWindow failed\n"); return 1; }
 		port_log("SSB64: Window OK\n");
 
+#ifdef __vita__
+		/* Hardware proved that a Fast3D shader compiles here, before the game
+		 * resource set consumes newlib's heap, but the same compiler returns
+		 * only "fatal internal error line -1" for every new program requested
+		 * during scene rendering. Precompile all pairs observed across the
+		 * hardware boot/attract-mode captures while the compiler still has a
+		 * usable heap. RunEarlyShaderSelfTest leaves successful programs in the
+		 * renderer's normal RAM cache, so later draws reuse them without the
+		 * unsafe on-disk glProgramBinary cache. */
+		struct VitaEarlyShaderKey {
+			uint64_t id0;
+			uint64_t id1;
+		};
+		static constexpr VitaEarlyShaderKey kVitaEarlyShaders[] = {
+			{ 0x0000000010001000ULL, 0xFFFFFFFFFFFF0000ULL },
+			{ 0x0000000080008000ULL, 0xFFFFFFFFFFFF0020ULL },
+			{ 0x0000000010001000ULL, 0xFFFFFFFFFFFF0001ULL },
+			{ 0x0000000080000108ULL, 0xFFFFFFFFFFFF0300ULL },
+			{ 0x0000000001080108ULL, 0xFFFFFFFFFFFF0300ULL },
+			{ 0x000000008000C000ULL, 0xFFFFFFFFFFFF0001ULL },
+			{ 0x0000000001080108ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x0000000080001000ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x0000000001080108ULL, 0xFFFFFFFFFFFF0321ULL },
+			{ 0x0000000010001000ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x010D020DC0001000ULL, 0xFFFFFFFFFFFF0012ULL },
+			{ 0x0000000080000108ULL, 0xFFFFFFFFFFFF0225ULL },
+			{ 0x020D020D10001000ULL, 0xFFFFFFFFFFFF0012ULL },
+			{ 0x0000000001080108ULL, 0xFFFFFFFFFFFF0000ULL },
+			{ 0x0000000080000108ULL, 0xFFFFFFFFFFFF0025ULL },
+			{ 0x0000000001080108ULL, 0xFFFFFFFFFFFF0100ULL },
+			{ 0x0000000080000108ULL, 0xFFFFFFFFFFFF0000ULL },
+			{ 0x0000000080000108ULL, 0xFFFFFFFFFFFF0325ULL },
+			{ 0x0000000001080108ULL, 0xFFFFFFFFFFFF0025ULL },
+			{ 0x010D020D80000108ULL, 0xFFFFFFFFFFFF0012ULL },
+			{ 0x010D030DC0000201ULL, 0xFFFFFFFFFFFF0012ULL },
+			{ 0x0000000080002821ULL, 0xFFFFFFFFFFFF0101ULL },
+			{ 0x0000000001081000ULL, 0xFFFFFFFFFFFF0001ULL },
+			{ 0x0000000001080108ULL, 0xFFFFFFFFFFFF0200ULL },
+			{ 0x00000000C0001000ULL, 0xFFFFFFFFFFFF0000ULL },
+			{ 0x0000000080002821ULL, 0xFFFFFFFFFFFF0001ULL },
+			{ 0x0000000080000108ULL, 0xFFFFFFFFFFFF0200ULL },
+			{ 0x0000000080000108ULL, 0xFFFFFFFFFFFF0125ULL },
+			{ 0x0000000001080108ULL, 0xFFFFFFFFFFFF0121ULL },
+			{ 0x0000000001080108ULL, 0xFFFFFFFFFFFF0221ULL },
+			{ 0x0000000080000108ULL, 0xFFFFFFFFFFFF0321ULL },
+			{ 0x0000000001082821ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x0000000080000108ULL, 0xFFFFFFFFFFFF0121ULL },
+			{ 0x0000000080000108ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x010D020D80000108ULL, 0xFFFFFFFFFFFF0112ULL },
+			{ 0x020D030D10000201ULL, 0xFFFFFFFFFFFF0012ULL },
+			{ 0x0000000028212821ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x0000000001080108ULL, 0xFFFFFFFFFFFF0125ULL },
+			{ 0x010D020D80000108ULL, 0xFFFFFFFFFFFF0312ULL },
+			{ 0x010D020D80000108ULL, 0xFFFFFFFFFFFF0212ULL },
+			{ 0x0000000001082821ULL, 0xFFFFFFFFFFFF0121ULL },
+		};
+		constexpr unsigned int kVitaEarlyShaderCount =
+			(unsigned int)(sizeof(kVitaEarlyShaders) / sizeof(kVitaEarlyShaders[0]));
+		struct mallinfo shaderMiBefore = mallinfo();
+		SceKernelFreeMemorySizeInfo shaderKernelBefore = {};
+		shaderKernelBefore.size = sizeof(shaderKernelBefore);
+		sceKernelGetFreeMemorySize(&shaderKernelBefore);
+		port_log("SSB64: EARLY_SHADER_PREWARM begin count=%u "
+		         "newlib_arena=%u free=%u used=%u kernel_user=%u\n",
+		         kVitaEarlyShaderCount,
+		         (unsigned int)shaderMiBefore.arena, (unsigned int)shaderMiBefore.fordblks,
+		         (unsigned int)shaderMiBefore.uordblks, (unsigned int)shaderKernelBefore.size_user);
+		VitaPresentShaderWarmupProgress(0, kVitaEarlyShaderCount);
+
+		unsigned int earlyShaderSuccess = 0;
+		for (unsigned int i = 0; i < kVitaEarlyShaderCount; ++i) {
+			const VitaEarlyShaderKey& key = kVitaEarlyShaders[i];
+			const bool ok = window->RunEarlyShaderSelfTest(key.id0, key.id1);
+			if (ok) {
+				earlyShaderSuccess++;
+			}
+			port_log("SSB64: EARLY_SHADER_PREWARM item=%u/%u result=%s "
+			         "id0=%016llX id1=%016llX\n",
+			         i + 1, kVitaEarlyShaderCount, ok ? "SUCCESS" : "FAIL",
+			         (unsigned long long)key.id0, (unsigned long long)key.id1);
+			VitaPresentShaderWarmupProgress(i + 1, kVitaEarlyShaderCount);
+		}
+
+		struct mallinfo shaderMiAfter = mallinfo();
+		SceKernelFreeMemorySizeInfo shaderKernelAfter = {};
+		shaderKernelAfter.size = sizeof(shaderKernelAfter);
+		sceKernelGetFreeMemorySize(&shaderKernelAfter);
+		port_log("SSB64: EARLY_SHADER_PREWARM complete success=%u failed=%u "
+		         "newlib_arena=%u free=%u used=%u kernel_user=%u\n",
+		         earlyShaderSuccess, kVitaEarlyShaderCount - earlyShaderSuccess,
+		         (unsigned int)shaderMiAfter.arena, (unsigned int)shaderMiAfter.fordblks,
+		         (unsigned int)shaderMiAfter.uordblks, (unsigned int)shaderKernelAfter.size_user);
+#endif
+
 		// Esc Menu screen, Toggle with Esc.
 		if (auto gui = window->GetGui()) {
 			port_log("SSB64: attaching Port menu ...\n");
@@ -940,6 +1079,29 @@ static int PortInitImpl(int argc, char* argv[]) {
 #endif
 	}
 
+	// Desktop backends keep the game in mGameFb so transition snapshots can
+	// sample the previous frame. On Vita that path adds an off-screen FBO and
+	// then asks ImGui/vitaGL to sample its color attachment back into FB 0.
+	// Hardware logs prove the Fast3D programs link and submit geometry, but the
+	// composed texture never reaches the display. Render directly to vitaGL's
+	// display framebuffer instead; transition captures will gracefully fall
+	// back until a Vita-specific FB0 capture path is implemented.
+#ifdef __vita__
+	if (auto cv = sContext->GetConsoleVariables()) {
+		cv->SetInteger("gMSAAValue", 1);
+		cv->SetInteger("gPostProcessEnabled", 0);
+		cv->SetInteger("gLowResMode", 0);
+		cv->SetInteger("gAdvancedResolution.Enabled", 0);
+		cv->SetFloat("gInternalResolution", 1.0f);
+	}
+	if (auto vitaWindow = sContext->GetWindow()) {
+		vitaWindow->SetMsaaLevel(1);
+	}
+	port_capture_set_force_render_to_fb(0);
+	port_log("SSB64: Vita present experiment v4 path=direct-fb0 size=960x544 "
+	         "sdl_dimensions=forced swap=vglSwapBuffers prewarm_progress=clearbar "
+	         "shader_cache=vitagl-gxp msaa=1 postprocess=0\n");
+#else
 	// Pin LUS to off-screen rendering so mGameFb is populated during
 	// gameplay and the GPU readback at scene transitions captures the
 	// prior frame rather than the post-Present swap-chain back buffer
@@ -948,6 +1110,7 @@ static int PortInitImpl(int argc, char* argv[]) {
 	// match -> results-screen photo wipe (issue #81). Cost is one extra
 	// full-screen blit per frame (sub-millisecond on any modern GPU).
 	port_capture_set_force_render_to_fb(1);
+#endif
 
 	// FileDropMgr must come up before the first-run wizard so SDL_DROPFILE
 	// events landing on the window during the wizard frame loop can be

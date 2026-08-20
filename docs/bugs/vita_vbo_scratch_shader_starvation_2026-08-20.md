@@ -1,7 +1,12 @@
 # Vita VBO scratch starvation and black screen
 
-**Status:** VBO churn fixed and audio improved on hardware; seek-free O2R
-streaming and the associated ABI rebuild fix await hardware confirmation.
+**Status:** Resolved on hardware. VBO churn, seek-free O2R streaming, the ABI
+rebuild fix, the 41-program early shader pre-warm, and direct FB0 presentation
+(bypassing `SDL_GL_SwapWindow` and the fixed 960x544 window/drawable size) are
+all confirmed on hardware — video is now visible. The desktop transition-
+capture workaround (off-screen `mGameFb` FBO composited via `ImGui::Image`)
+remains disabled on Vita; re-enabling stage-transition snapshots needs a
+Vita-native FB0 capture path, not yet implemented.
 
 ## Symptoms
 
@@ -166,3 +171,91 @@ SSB64: Vita O2R source=pread path=app0:/f3d.o2r size=...
 A later marker must report the main `BattleShip.o2r` archive. There must be no
 data abort in `ArchiveManager::AddArchive()` and no `app0` path bytes in a fault
 address. Only after these gates pass can the shader-memory result be evaluated.
+
+## Early shader timing proof
+
+The first post-`InitWindow()` Fast3D self-test compiled both stages and linked
+successfully before `BattleShip.o2r` and the game resources were loaded:
+
+```text
+SSB64: EARLY_SHADER_TEST result=SUCCESS ...
+```
+
+The same run later failed every newly encountered program once newlib usage had
+grown from roughly 68 MiB to 107--115 MiB. The successful early program was
+reused by the renderer and changed the VBO diagnostic from zero activity to
+`bytes=840 draws=3`, proving that a valid cached Fast3D program reaches the draw
+path. The screen remained black because one program was insufficient for the
+scene and all other programs were still compiled too late.
+
+The Vita startup now precompiles the 41 unique shader pairs observed across the
+full hardware boot and attract-mode captures immediately after `InitWindow()`.
+Successful programs remain in `GfxRenderingAPIOGL`'s in-memory map; the unsafe
+on-disk `glProgramBinary()` cache stays disabled. The next hardware log must
+contain:
+
+```text
+SSB64: EARLY_SHADER_PREWARM begin count=41 ...
+SSB64: EARLY_SHADER_PREWARM complete success=41 failed=0 ...
+```
+
+Any later `shader link failed` line identifies a pair not yet present in the
+pre-warm set and should be added before evaluating rendering completeness.
+
+## Direct-display experiment after successful pre-warm
+
+The next hardware run completed the entire pre-warm set (`41/41`), emitted no
+later shader-link failures, and submitted real Fast3D work (`50232` VBO bytes,
+`37` draws at frame 240, with zero dropped draws). The persistent black screen
+is therefore downstream of shader compilation and geometry submission.
+
+The desktop transition-capture workaround was still forcing every Vita frame
+through `mGameFb`, followed by an `ImGui::Image` copy of that framebuffer's
+texture into display framebuffer 0. The Vita build now bypasses that unproven
+off-screen sampling path and draws directly into vitaGL framebuffer 0. It also
+pins MSAA to 1, disables post-processing, and consistently uses the physical
+Vita height of 544 pixels rather than the previous SDL-only 545 value.
+
+The next hardware log must contain:
+
+```text
+SSB64: Vita present experiment v3 path=direct-fb0 size=960x544 sdl_dimensions=forced swap=vglSwapBuffers msaa=1 postprocess=0
+SSB64: Vita present frame=... path=direct-fb0 window=960x544 ...
+```
+
+If video becomes visible, the failure was the off-screen FBO-to-ImGui texture
+composition. Stage-transition snapshot effects remain disabled on Vita until
+FB0 capture is implemented without reintroducing that per-frame path. If the
+screen remains black while the log says `direct-fb0`, the next target is the
+vitaGL/SDL swap path itself, not Fast3D shader generation.
+
+The first direct-FB0 hardware run exposed a more specific failure before swap:
+
+```text
+SSB64: Vita present frame=120 path=direct-fb0 window=0x0 render=32x32
+viewport=(60,60 32x32) ...
+```
+
+VitaSDK SDL2 returned zero from its window/drawable-size queries. ImGui then
+never created the full-screen dockspace and left `Main Game` at its 32x32
+fallback size; Fast3D correctly followed that invalid viewport. Both the SDL
+window backend and ImGui SDL backend now use the fixed vitaGL display size of
+960x544 on Vita. The corrected run must report `window=960x544` and a game
+viewport close to the full display instead of 32x32.
+
+The corrected hardware run did report the full `960x544` window, render size,
+and viewport, but the display remained black. The build links VitaSDK's stock
+`libSDL2.a`, whose Vita driver presents its own sceGxm `SDL_Renderer` surface;
+it is not the Northfear SDL vitaGL backend. This port initializes vitaGL
+directly, so `SDL_GL_SwapWindow()` was not presenting the surface Fast3D drew
+into. Vita now ends each frame with `vglSwapBuffers(GL_FALSE)` instead. A small
+nine-point FB0 sample is logged before swap at frames 3, 120, 240, and so on.
+The next run must contain both:
+
+```text
+SSB64: Vita swap frame=... backend=vglSwapBuffers common_dialog=0
+SSB64: Vita FB0 sample frame=... draw_fbo=0 ... nonblack=.../9 ... glerr_after=0000
+```
+
+`nonblack > 0` proves that FB0 already contains image data before presentation;
+`glerr_after=0000` proves the diagnostic readback itself was accepted.

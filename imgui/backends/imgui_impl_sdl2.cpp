@@ -937,6 +937,14 @@ void ImGui_ImplSDL2_NewFrame()
     // Setup display size (every frame to accommodate for window resizing)
     int w = 0, h = 0;
     int display_w = 0, display_h = 0;
+#ifdef __vita__
+    // The Vita SDL video backend exposes no meaningful desktop-window size
+    // for an OpenGL/vitaGL surface and returns 0x0 here. The display is fixed,
+    // so feed ImGui the physical dimensions directly. Without this, the main
+    // dockspace never initializes and "Main Game" remains at its 32x32 default.
+    w = display_w = 960;
+    h = display_h = 544;
+#else
     SDL_GetWindowSize(bd->Window, &w, &h);
     if (SDL_GetWindowFlags(bd->Window) & SDL_WINDOW_MINIMIZED)
         w = h = 0;
@@ -948,6 +956,7 @@ void ImGui_ImplSDL2_NewFrame()
 #endif
     else
         SDL_GL_GetDrawableSize(bd->Window, &display_w, &display_h);
+#endif
     // ErrorCheckNewFrameSanityChecks() (imgui.cpp) asserts DisplaySize.x/y
     // >= 0 - seen crashing on Vita on the very first NewFrame() a boot-time
     // loading screen forces before the platform window is fully settled.
