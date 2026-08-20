@@ -810,7 +810,12 @@ void PortPushFrame(void)
 		gPortGLDumpDraws = (vi >= sDumpDrawsFirst && vi <= sDumpDrawsLast) ? vi : 0;
 	}
 #endif
+	/* One aggregate sample per VI is cheap enough for release hardware and
+	 * lets the Vita log separate display-list rendering from the rest of the
+	 * game tick without reintroducing per-draw diagnostics. */
+	auto dlStart = std::chrono::steady_clock::now();
 	port_drain_pending_display_list();
+	auto dlEnd = std::chrono::steady_clock::now();
 
 	/* TCC mod hook: GamePostUpdateEvent fires once per frame AFTER game
 	 * logic + GFX submission. Most common subscription point — game state
@@ -869,13 +874,66 @@ void PortPushFrame(void)
 			}
 		}
 	}
+
+#ifdef __vita__
+	const bool vitaHadDisplayList = (sDLSubmitsThisFrame != 0);
+#endif
 	sDLSubmitsThisFrame = 0;
 
 	/* Feed the interpolation auto-throttle the wall duration of this tick;
 	 * if the host cannot sustain 60 ticks/s at the configured subframe
 	 * count, it steps the render rate down to protect the game clock. */
-	portInterpNoteTicDuration(std::chrono::duration_cast<std::chrono::microseconds>(
-		std::chrono::steady_clock::now() - frameStart).count());
+	auto frameEnd = std::chrono::steady_clock::now();
+	const auto frameDurationUs = std::chrono::duration_cast<std::chrono::microseconds>(
+		frameEnd - frameStart).count();
+	portInterpNoteTicDuration(frameDurationUs);
+
+#ifdef __vita__
+	/* Report one compact line per 300 VI frames. fps_x100 is fixed point
+	 * (e.g. 5994 = 59.94 FPS); dl_us covers Fast3D, GUI and presentation for
+	 * frames that submitted a display list. The separate backend line times
+	 * vglSwapBuffers itself, so CPU/game and GPU/present pressure can be
+	 * distinguished from the next hardware log. */
+	{
+		static uint32_t perfFrames = 0;
+		static uint32_t perfDlFrames = 0;
+		static uint32_t perfIdleFrames = 0;
+		static uint64_t perfFrameUsTotal = 0;
+		static uint64_t perfDlUsTotal = 0;
+		static uint32_t perfFrameUsMax = 0;
+		static uint32_t perfDlUsMax = 0;
+		static auto perfWindowStart = frameStart;
+
+		const uint32_t frameUs = frameDurationUs > 0 ? (uint32_t)frameDurationUs : 0;
+		const auto dlDurationUs = std::chrono::duration_cast<std::chrono::microseconds>(dlEnd - dlStart).count();
+		const uint32_t dlUs = dlDurationUs > 0 ? (uint32_t)dlDurationUs : 0;
+		perfFrames++;
+		perfFrameUsTotal += frameUs;
+		perfDlUsTotal += dlUs;
+		if (frameUs > perfFrameUsMax) perfFrameUsMax = frameUs;
+		if (dlUs > perfDlUsMax) perfDlUsMax = dlUs;
+		if (vitaHadDisplayList) perfDlFrames++;
+		else perfIdleFrames++;
+
+		if (perfFrames >= 300) {
+			const auto wallDurationUs = std::chrono::duration_cast<std::chrono::microseconds>(
+				frameEnd - perfWindowStart).count();
+			const uint32_t fpsX100 = wallDurationUs > 0
+				? (uint32_t)(((uint64_t)perfFrames * 100000000ULL) / (uint64_t)wallDurationUs)
+				: 0;
+			port_log("SSB64: PERF frames=%u fps_x100=%u frame_us_avg=%u frame_us_max=%u "
+			         "dl_us_avg=%u dl_us_max=%u dl_frames=%u idle_frames=%u\n",
+			         perfFrames, fpsX100,
+			         (uint32_t)(perfFrameUsTotal / perfFrames), perfFrameUsMax,
+			         (uint32_t)(perfDlUsTotal / perfFrames), perfDlUsMax,
+			         perfDlFrames, perfIdleFrames);
+			perfFrames = perfDlFrames = perfIdleFrames = 0;
+			perfFrameUsTotal = perfDlUsTotal = 0;
+			perfFrameUsMax = perfDlUsMax = 0;
+			perfWindowStart = frameEnd;
+		}
+	}
+#endif
 
 	/* Tell the hang watchdog a frame completed. */
 	port_watchdog_note_frame_end();

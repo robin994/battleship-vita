@@ -1038,6 +1038,16 @@ static int PortInitImpl(int argc, char* argv[]) {
 			{ 0x0000000080001218ULL, 0xFFFFFFFFFFFF0021ULL },
 			{ 0x020D020D818A818AULL, 0xFFFFFFFFFFFF0F35ULL },
 			{ 0x020D020D818A818AULL, 0xFFFFFFFFFFFF0A35ULL },
+			/* Programs first reached by the complete VS-match hardware run.
+			 * At that point newlib had only 2.2--2.4 MiB free and Shark
+			 * rejected every one with its allocation-style internal error.
+			 * Compile them here, in the same proven early window as the other
+			 * programs, so loading screens and late effects cannot lose draws. */
+			{ 0x00000000C0001000ULL, 0xFFFFFFFFFFFF0005ULL },
+			{ 0xD000D00080002821ULL, 0xFFFFFFFFFFFF0331ULL },
+			{ 0xD000D3D210001000ULL, 0xFFFFFFFFFFFF0010ULL },
+			{ 0xD000D3D280000108ULL, 0xFFFFFFFFFFFF0035ULL },
+			{ 0xD000D3D280000108ULL, 0xFFFFFFFFFFFF0110ULL },
 		};
 		constexpr unsigned int kVitaEarlyShaderCount =
 			(unsigned int)(sizeof(kVitaEarlyShaders) / sizeof(kVitaEarlyShaders[0]));
