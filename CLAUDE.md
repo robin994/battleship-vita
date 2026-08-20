@@ -127,13 +127,15 @@ Full clean rebuild (`make -f Makefile.vita clean` then `objects`) is required wh
 ```sh
 cd ~/.local/opt/vitadb-deps/vitaGL-nosplash
 make clean
-make HAVE_PTHREAD=1 LOG_ERRORS=1 HAVE_GLSL_TEXTURE_SIZE=1 INDICES_SPEEDHACK=1 NO_SPLASHSCREEN=1 -j$(sysctl -n hw.ncpu)
+make HAVE_PTHREAD=1 LOG_ERRORS=1 HAVE_GLSL_TEXTURE_SIZE=1 INDICES_SPEEDHACK=1 NO_SPLASHSCREEN=1 HAVE_SHADER_CACHE=1 -j$(sysctl -n hw.ncpu)
 ```
 
 Gotchas found this session:
 - **`HAVE_PTHREAD` is structurally broken in this vendored source**: `gxm.c`'s garbage-collector-thread creation checks `#ifdef HAVE_PTRHEAD` — letters transposed (should be `HAVE_PTHREAD`) — so passing `HAVE_PTHREAD=1` compiles the flag into `CFLAGS` but the check never matches; the GC thread always falls through to `sceKernelCreateThread`. Not yet fixed upstream in this vendor copy; fix the typo in `source/gxm.c` if `pthread`-based GC threading is ever actually needed.
 - **`VGL_GIT_HASH` must be supplied**: `source/splashscreen.c` does `const char *commit_hash = "#" VGL_GIT_HASH;` with no fallback. This vendored copy isn't a git checkout, so the Makefile now has `CFLAGS += -DVGL_GIT_HASH='"local-nosplash-build"'` added permanently near the top — don't remove it or the build fails on that one file.
 - **Flags don't retroactively apply to existing `.o` files.** Always `make clean` before changing flags (`HAVE_PTHREAD`, `LOG_ERRORS`, `NO_SPLASHSCREEN`, etc.) — verified by symbol inspection (`arm-vita-eabi-nm libvitaGL.a | grep <symbol only present under that flag>`) that a plain `make FLAG=1` reused stale objects and silently didn't apply the flag.
+- **Keep `HAVE_SHADER_CACHE=1` enabled for the Vita port.** The mandatory early Fast3D prewarm otherwise recompiles all observed programs on every launch. vitaGL stores successful custom shader GXPs below `ux0:data/shader_cache/<titleid>/v0/{v,f}`. Its cache-write path must check `s->prog`, the serialized buffer/size, and the `sceIoOpen()` result before writing; a Shark compile failure must never be serialized.
+- **Release startup target is 5–10 seconds, including a clean install.** After one complete cold hardware run, copy `ux0:data/shader_cache/SSB64VITA/v0/{v,f}` to `port/vita_shader_cache/v0/{v,f}` without renaming the GXP files. `Makefile.vita` then packages them at `app0:/shader_cache/v0/{v,f}` and the renderer selects that read-only cache before `vglInitWithCustomThreshold()`. Do not substitute Vita3K's `shaderlog/*.gxp`: those are emulator pipeline dumps, not vitaGL's serialized custom-shader cache.
 - After rebuilding vitaGL, BattleShip's own `battleship.elf` needs relinking (delete `build/battleship.elf*` and re-run the link step) — `make objects` won't detect that the external `.a` changed.
 - `~/.local/opt/vitadb-deps/vitaGL-nosplash` is a filesystem path specific to this dev machine, not tracked by any repo here — if it's missing, ask the user where their vendored vitaGL lives before assuming a fresh checkout is safe to `make clean`.
 

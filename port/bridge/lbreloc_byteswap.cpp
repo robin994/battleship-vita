@@ -1551,7 +1551,7 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 	}
 
 	static unsigned int sRuntimeTexTraceCount = 0;
-	if (sRuntimeTexTraceCount < 512)
+	if (sRuntimeTexTraceCount < 32)
 	{
 		uintptr_t descBase = 0;
 		size_t descSize = 0;

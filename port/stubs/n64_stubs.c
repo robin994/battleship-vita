@@ -87,26 +87,15 @@ static void port_register_service_thread(OSThread *t)
 	}
 }
 
+#ifndef __vita__
 static s32 sResumeDebugCount = 0;
+#endif
 
 /* Called by PortPushFrame to resume all service thread coroutines
  * that have messages waiting in their blocked queues. */
 void port_resume_service_threads(void)
 {
-	/* Temporary unconditional heartbeat (2026-08-19 hang investigation):
-	 * the verbose debug logging below is self-limited to the first few
-	 * calls by design (avoids infinite per-frame spam), so its silence
-	 * doesn't mean the frame loop stopped - this print isn't gated on
-	 * anything, so its absence (or presence) actually distinguishes
-	 * "still calling this every frame" from "genuinely stuck." Remove
-	 * once resolved. */
-	{
-		static s32 sHeartbeatCount = 0;
-		if ((sHeartbeatCount % 30) == 0) {
-			port_log("SSB64: HEARTBEAT port_resume_service_threads call #%d\n", (int)sHeartbeatCount);
-		}
-		sHeartbeatCount++;
-	}
+#ifndef __vita__
 	if (sResumeDebugCount < 3) {
 		port_log( "SSB64: port_resume_service_threads: %d threads registered\n",
 		        (int)sServiceThreadCount);
@@ -119,6 +108,7 @@ void port_resume_service_threads(void)
 		}
 		sResumeDebugCount++;
 	}
+#endif
 
 	/* Resume threads in priority order (higher priority first).
 	 * Simple bubble: scheduler(120) > controller(115) > audio(110) > game(50)
@@ -183,21 +173,27 @@ void port_resume_service_threads(void)
 			if ((int)t->id == 5) {
 				game_thread_resumes_this_frame++;
 			}
-			if (sResumeDebugCount <= 5) {
+#ifndef __vita__
+			if (sResumeDebugCount <= 3) {
 				port_log("  round %d: resumed thread %d (finished=%d)\n",
 				         (int)round, (int)t->id,
 				         port_coroutine_is_finished((PortCoroutine *)t->port_coroutine));
 			}
+#endif
 			progress = 1;
 		}
 		if (!progress) {
-			if (sResumeDebugCount <= 5) {
+#ifndef __vita__
+			if (sResumeDebugCount <= 3) {
 				port_log("  round %d: no progress, breaking\n", (int)round);
 			}
+#endif
 			break;  /* No thread made progress — done for this frame */
 		}
 	}
-	if (sResumeDebugCount <= 5) sResumeDebugCount++;
+#ifndef __vita__
+	if (sResumeDebugCount <= 3) sResumeDebugCount++;
+#endif
 }
 
 void osCreateThread(OSThread *t, OSId id, void (*entry)(void *), void *arg,
@@ -338,7 +334,9 @@ s32 osSendMesg(OSMesgQueue *mq, OSMesg msg, s32 flag)
 	return 0;
 }
 
+#ifndef __vita__
 static s32 sRecvDebugCount = 0;
+#endif
 
 s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag)
 {
@@ -348,11 +346,13 @@ s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag)
 			return -1;
 		}
 		/* OS_MESG_BLOCK: yield until a message arrives. */
-		if (sRecvDebugCount < 50) {
+#ifndef __vita__
+		if (sRecvDebugCount < 12) {
 			port_log("SSB64: osRecvMesg BLOCK on mq=%p (valid=%d cap=%d) — yielding\n",
 			         (void *)mq, (int)mq->validCount, (int)mq->msgCount);
 			sRecvDebugCount++;
 		}
+#endif
 		while (mq->validCount == 0) {
 			if (port_coroutine_in_coroutine()) {
 				port_coroutine_yield();
@@ -362,10 +362,12 @@ s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag)
 				return -1;
 			}
 		}
-		if (sRecvDebugCount < 50) {
+#ifndef __vita__
+		if (sRecvDebugCount < 12) {
 			port_log("SSB64: osRecvMesg BLOCK on mq=%p — woke up (valid=%d)\n",
 			         (void *)mq, (int)mq->validCount);
 		}
+#endif
 	}
 
 	if (msg != NULL) {

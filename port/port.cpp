@@ -1022,6 +1022,22 @@ static int PortInitImpl(int argc, char* argv[]) {
 			{ 0x010D020D80000108ULL, 0xFFFFFFFFFFFF0312ULL },
 			{ 0x010D020D80000108ULL, 0xFFFFFFFFFFFF0212ULL },
 			{ 0x0000000001082821ULL, 0xFFFFFFFFFFFF0121ULL },
+			/* Programs first observed later in the four-minute hardware run.
+			 * They all failed once the game archive had expanded newlib's arena,
+			 * so they must be compiled while the same early heap window is open. */
+			{ 0x0000000001080108ULL, 0xFFFFFFFFFFFF0325ULL },
+			{ 0x010D020D80000108ULL, 0xFFFFFFFFFFFF0037ULL },
+			{ 0x010D020D80000108ULL, 0xFFFFFFFFFFFF0237ULL },
+			{ 0x020D020D818A818AULL, 0xFFFFFFFFFFFF0F31ULL },
+			{ 0x0000000080002821ULL, 0xFFFFFFFFFFFF0321ULL },
+			{ 0x0000000001088000ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x0000000001081000ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x0000000080008000ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x0000000010001000ULL, 0xFFFFFFFFFFFF0020ULL },
+			{ 0x000000008000818EULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x0000000080001218ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x020D020D818A818AULL, 0xFFFFFFFFFFFF0F35ULL },
+			{ 0x020D020D818A818AULL, 0xFFFFFFFFFFFF0A35ULL },
 		};
 		constexpr unsigned int kVitaEarlyShaderCount =
 			(unsigned int)(sizeof(kVitaEarlyShaders) / sizeof(kVitaEarlyShaders[0]));
@@ -1098,9 +1114,9 @@ static int PortInitImpl(int argc, char* argv[]) {
 		vitaWindow->SetMsaaLevel(1);
 	}
 	port_capture_set_force_render_to_fb(0);
-	port_log("SSB64: Vita present experiment v4 path=direct-fb0 size=960x544 "
+	port_log("SSB64: Vita present experiment v5 path=direct-fb0 size=960x544 "
 	         "sdl_dimensions=forced swap=vglSwapBuffers prewarm_progress=clearbar "
-	         "shader_cache=vitagl-gxp msaa=1 postprocess=0\n");
+	         "shader_cache=vitagl-gxp precompiled_cache=auto msaa=1 postprocess=0\n");
 #else
 	// Pin LUS to off-screen rendering so mGameFb is populated during
 	// gameplay and the GPU readback at scene transitions captures the

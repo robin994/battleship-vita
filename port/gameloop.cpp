@@ -891,14 +891,16 @@ void PortPushFrame(void)
 	 * feature's env-var contract. */
 	portRenderDocOnFrame(static_cast<unsigned int>(sFrameCount));
 
+#ifndef __vita__
 	{
 		static auto sStartTime = std::chrono::steady_clock::now();
 		auto now = std::chrono::steady_clock::now();
 		double elapsed = std::chrono::duration<double>(now - sStartTime).count();
-		if (sFrameCount <= 60 || (sFrameCount % 60 == 0)) {
+		if (sFrameCount <= 5 || (sFrameCount % 600 == 0)) {
 			port_log("SSB64: Frame %d complete (t=%.2fs)\n", sFrameCount, elapsed);
 		}
 	}
+#endif
 }
 
 void PortGameShutdown(void)
