@@ -1050,6 +1050,15 @@ static int PortInitImpl(int argc, char* argv[]) {
 			{ 0xD000D3D210001000ULL, 0xFFFFFFFFFFFF0010ULL },
 			{ 0xD000D3D280000108ULL, 0xFFFFFFFFFFFF0035ULL },
 			{ 0xD000D3D280000108ULL, 0xFFFFFFFFFFFF0110ULL },
+			/* Programs first observed after the Vita texture-fixup hot path was
+			 * made fast enough to reach character select and a full VS battle at
+			 * 60 Hz. The first is requested in nSCKindPlayersVS (cursor/fighter
+			 * presentation); the latter two appear during the match. At those
+			 * points Shark fails from the fragmented late-game heap, so compile
+			 * them in the same early memory window as the established set. */
+			{ 0x020D020D01080108ULL, 0xFFFFFFFFFFFF0112ULL },
+			{ 0x0000000001082821ULL, 0xFFFFFFFFFFFF0001ULL },
+			{ 0x0000000080002821ULL, 0xFFFFFFFFFFFF0021ULL },
 		};
 		constexpr unsigned int kVitaEarlyShaderCount =
 			(unsigned int)(sizeof(kVitaEarlyShaders) / sizeof(kVitaEarlyShaders[0]));

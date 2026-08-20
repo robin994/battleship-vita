@@ -97,6 +97,12 @@ Stale worktrees under `.claude/worktrees/` from past sessions are fine to remove
 
 ## PS Vita Port
 
+> **Current handoff:** before changing the Vita path, read
+> [`docs/vita_current_handoff_2026-08-21.md`](docs/vita_current_handoff_2026-08-21.md).
+> It records the confirmed 60 FPS texture-fixup optimization, the current
+> 62-program shader-prewarm experiment, and the Fast3D cache architecture. It
+> supersedes older intermediate Vita shader-cache notes where they conflict.
+
 Real-hardware Vita bring-up lives on `main`/`vita-rinne-merge` branches (not upstream `JRickey/BattleShip`).
 Repos:
 - Outer tree: `robin994/battleship-vita` (`main`), remote name `vita-origin`.
