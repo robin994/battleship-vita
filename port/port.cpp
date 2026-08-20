@@ -1412,74 +1412,13 @@ int main(int argc, char* argv[]) {
 		// port_log("SSB64: DIAG vsnprintf pre-warm done\n");
 	}
 
-	/* Same lazy-first-use pattern one more time, this time for VitaSDK's
-	 * runtime shader compiler (SceShaccCg, reached via vitaGL's
-	 * glCompileShader/glLinkProgram). Real-hardware testing found the
-	 * first-ever glLinkProgram() call made from inside a game-object
-	 * coroutine reliably fails with "Shader Compiler: E] fatal internal
-	 * error on line -1." (confirmed via a synchronous diagnostic added to
-	 * vitaGL's compile_shader() - both the vertex AND fragment half of the
-	 * pair failed, and the actual GLSL source involved was ruled out first:
-	 * neither a genuine mod()/fmod() vector-scalar bug nor an unused
-	 * sampler2D-typed dead function - both real, both fixed independently -
-	 * changed this outcome). The two shaders that reliably succeed earlier
-	 * in boot are ImGui's built-in ones, compiled on the real thread before
-	 * PortGameInit() creates any coroutine - this is the same class of bug
-	 * as malloc/memalign/vsnprintf above, just for the shader compiler's
-	 * own one-time lazy setup instead of a kernel lock. Compile and link a
-	 * trivial throwaway program here, on the real thread, to force that
-	 * setup to happen somewhere safe before any coroutine exists. */
-	/* Tried and reverted: overriding SceShaccCg's optimizer settings via
-	 * vglSetupRuntimeShaderCompiler(SHARK_OPT_FAST, fastmath=0, fastprecision=0,
-	 * fastint=0) instead of vitaGL's defaults (fastmath=1, fastint=1 - see
-	 * custom_shaders.c's compiler_fastmath/compiler_fastint globals), on the
-	 * theory that an aggressive fast-math/fast-int pass might be the trigger
-	 * for SceShaccCg's internal compiler errors. Real-hardware test: the
-	 * first real in-coroutine shader compile that previously either crashed
-	 * fast or succeeded in ~13s instead hung indefinitely (4m45s+ waited,
-	 * no crash, no new coredump, log frozen at the same line) - the exact
-	 * same failure signature as the abandoned compile-retry experiment
-	 * above. Disabling fastmath/fastint makes this worse, not better. */
-	/* Tried and reverted (experiment #2): leave fastmath/fastint at vitaGL's
-	 * defaults (ruled out above) and instead drop just the optimizer level,
-	 * SHARK_OPT_FAST (O3) -> SHARK_OPT_SLOW (O0) - the most conservative
-	 * setting, disabling the most optimizer passes in one shot for a clear
-	 * signal. Real-hardware test: identical failure signature to experiment
-	 * #1 - the first real in-coroutine shader compile hung indefinitely
-	 * (280s+ waited, no crash, no new coredump, log frozen at the same
-	 * line) instead of its usual fast crash or ~13s success. Both of
-	 * vglSetupRuntimeShaderCompiler's knobs (fastmath/fastint, and opt
-	 * level) are now ruled out - any deviation from vitaGL's exact default
-	 * settings (SHARK_OPT_FAST, fastmath=1, fastprecision=0, fastint=1)
-	 * turns this shader's crash into a hang rather than fixing it. */
-	{
-		const char *warmVs = "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }";
-		const char *warmFs = "void main() { gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); }";
-		GLuint warmVsId = glCreateShader(GL_VERTEX_SHADER);
-		glShaderSource(warmVsId, 1, &warmVs, NULL);
-		glCompileShader(warmVsId);
-		GLuint warmFsId = glCreateShader(GL_FRAGMENT_SHADER);
-		glShaderSource(warmFsId, 1, &warmFs, NULL);
-		glCompileShader(warmFsId);
-		GLuint warmProg = glCreateProgram();
-		glAttachShader(warmProg, warmVsId);
-		glAttachShader(warmProg, warmFsId);
-		glLinkProgram(warmProg);
-		GLint warmLinked = 0;
-		glGetProgramiv(warmProg, GL_LINK_STATUS, &warmLinked);
-		/* Confirmed real-hardware nondeterminism investigating this class of
-		 * bug elsewhere (O2rArchive's ArchDiagLog): port_log alone is async
-		 * and its message can be lost if something downstream stalls or
-		 * crashes before the writer thread catches up. This runs on the
-		 * real thread specifically so we can be certain it happened - use
-		 * the same synchronous sceClibPrintf fallback rather than relying
-		 * solely on the polled log file. */
-		port_log("SSB64: shader compiler pre-warm done (linked=%d)\n", (int)warmLinked);
-		sceClibPrintf("SSB64: shader compiler pre-warm done (linked=%d)\n", (int)warmLinked);
-		glDeleteProgram(warmProg);
-		glDeleteShader(warmVsId);
-		glDeleteShader(warmFsId);
-	}
+	/* InitWindow compiles ImGui's shaders on the real thread after vitaGL has
+	 * created its GXM shader patcher and before the game archive consumes
+	 * most of newlib's heap. That successful compile is the safe SceShaccCg
+	 * warm-up. Do not issue GL calls here: main() reaches this block before
+	 * PortInit/InitWindow, and the former throwaway pre-warm consequently
+	 * called sceGxmShaderPatcherRegisterProgram with an uninitialized patcher
+	 * (SCE_GXM_ERROR_INVALID_POINTER on real hardware). */
 #endif
 
 #ifdef __APPLE__

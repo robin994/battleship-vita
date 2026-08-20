@@ -242,6 +242,13 @@ port/stubs/%.o: CPPFLAGS := -Idecomp/include -Wno-implicit-int -Wno-shift-negati
 libgfxd/%.o: CPPFLAGS := -Wno-implicit-function-declaration -UF3DEX_GBI_2
 
 OBJS := $(CFILES:.c=.o) $(CPPFILES:.cpp=.o) $(SFILES:.S=.o)
+DEPS := $(OBJS:.o=.d)
+
+# The original Vita makefile relied only on source timestamps. A header-only
+# layout change could therefore leave consumers built against a different C++
+# ABI (observed with O2rArchive's virtual Archive base). Generate and include
+# compiler dependency files so future header edits rebuild every affected TU.
+-include $(DEPS)
 
 OBJS_PREPARE := $(CFILES:.c=.ok) $(CPPFILES:.cpp=.ok) $(SFILES:.S=.ok)
 
@@ -253,7 +260,7 @@ PREFIX = arm-vita-eabi
 CC  = $(PREFIX)-gcc
 CXX = $(PREFIX)-g++
 
-CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-short-enums -fsigned-char \
+CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-short-enums -fsigned-char -MMD -MP \
 	-I$(VITAGL_DIR)/source \
 	$(foreach dir,$(INCLUDES),-I$(dir)) -fno-strict-aliasing -DMA_NO_RUNTIME_LINKING \
 	-DNDEBUG \
@@ -333,4 +340,5 @@ build/battleship.elf: $(FINAL_OBJS)
 objects: $(OBJS)
 
 clean: $(OBJS_CLEAN)
+	@rm -f $(DEPS)
 	@rm -rf build/battleship.velf build/battleship.elf build/battleship.elf.unstripped.elf $(FINAL_OBJS) build/eboot.bin build/battleship.vpk build/param.sfo
