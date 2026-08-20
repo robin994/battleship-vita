@@ -448,6 +448,14 @@ extern "C" void port_sim_load_stall(int n)
 
 extern "C" void port_submit_display_list(void *dl)
 {
+	{
+		static int sLoggedFirstSubmitDL = 0;
+		if (!sLoggedFirstSubmitDL) {
+			sLoggedFirstSubmitDL = 1;
+			port_log("SSB64: MARKER first port_submit_display_list entry\n");
+		}
+	}
+
 	if (sSimLoadStallFrames > 0) {
 		sSimLoadStallFrames--;
 		return;

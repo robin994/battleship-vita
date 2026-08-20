@@ -627,6 +627,14 @@ void osSpTaskStartGo(OSTask *tp)
 		return;
 	}
 
+	{
+		static int sLoggedFirstTaskGo = 0;
+		if (!sLoggedFirstTaskGo) {
+			sLoggedFirstTaskGo = 1;
+			port_log("SSB64: MARKER first osSpTaskStartGo type=%d\n", (int)tp->t.type);
+		}
+	}
+
 	if (sTaskGoCount <= 60 || (sTaskGoCount % 60 == 0)) {
 		port_log("SSB64: osSpTaskStartGo #%d type=%d data_ptr=%p\n",
 		         (int)sTaskGoCount, (int)tp->t.type, (void *)tp->t.data_ptr);
