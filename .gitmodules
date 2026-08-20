@@ -4,8 +4,8 @@
 	branch = vita-rinne-merge
 [submodule "torch"]
 	path = torch
-	url = https://github.com/JRickey/Torch.git
-	branch = ssb64
+	url = https://github.com/robin994/Torch.git
+	branch = vita-compat-fixes
 [submodule "decomp"]
 	path = decomp
 	url = https://github.com/robin994/ssb-decomp-re-vita.git
