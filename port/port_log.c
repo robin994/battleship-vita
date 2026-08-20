@@ -64,7 +64,9 @@ typedef struct {
 } LogQueue;
 
 static int sLogFd = -1;
+#if defined(__vita__) && defined(PORT_LOG_STDOUT)
 static LogQueue sPrintQueue = { .mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
+#endif
 static LogQueue sFileQueue = { .mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 
 static void QueuePush(LogQueue *q, const char *line)
@@ -76,10 +78,16 @@ static void QueuePush(LogQueue *q, const char *line)
 		pthread_mutex_unlock(&q->mutex);
 		return;
 	}
+	/* Only the empty -> non-empty transition can make the consumer runnable.
+	 * Avoid redundant pthread condition-variable (and underlying kernel
+	 * semaphore) bookkeeping on every line in a high-rate logging burst. */
+	const int was_empty = (q->count == 0);
 	memcpy(q->lines[q->head], line, LOG_LINE_MAX);
 	q->head = (q->head + 1) % LOG_QUEUE_SLOTS;
 	q->count++;
-	pthread_cond_signal(&q->cond);
+	if (was_empty) {
+		pthread_cond_signal(&q->cond);
+	}
 	pthread_mutex_unlock(&q->mutex);
 }
 
@@ -110,7 +118,7 @@ static void QueueShutdown(LogQueue *q)
 	pthread_mutex_unlock(&q->mutex);
 }
 
-#ifdef __vita__
+#if defined(__vita__) && defined(PORT_LOG_STDOUT)
 static void *PrintWriterMain(void *arg)
 {
 	(void)arg;
@@ -175,7 +183,7 @@ void port_log_init(const char *path)
 	if (pthread_create(&sFileQueue.thread, &stack_attr, FileWriterMain, NULL) == 0) {
 		sFileQueue.started = 1;
 	}
-#ifdef __vita__
+	#if defined(__vita__) && defined(PORT_LOG_STDOUT)
 	if (pthread_create(&sPrintQueue.thread, &stack_attr, PrintWriterMain, NULL) == 0) {
 		sPrintQueue.started = 1;
 	}
@@ -190,11 +198,13 @@ void port_log_close(void)
 		pthread_join(sFileQueue.thread, NULL);
 		sFileQueue.started = 0;
 	}
+	#if defined(__vita__) && defined(PORT_LOG_STDOUT)
 	if (sPrintQueue.started) {
 		QueueShutdown(&sPrintQueue);
 		pthread_join(sPrintQueue.thread, NULL);
 		sPrintQueue.started = 0;
 	}
+	#endif
 	if (sLogFd >= 0) {
 #if defined(_WIN32)
 		_close(sLogFd);
@@ -234,7 +244,7 @@ void port_log(const char *fmt, ...)
 #endif
 	va_end(ap);
 
-#ifdef __vita__
+#if defined(__vita__) && defined(PORT_LOG_STDOUT)
 	if (sPrintQueue.started) {
 		QueuePush(&sPrintQueue, formatted);
 	}

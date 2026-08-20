@@ -28,6 +28,8 @@
 #include <malloc.h>
 #include <unistd.h>
 #include <psp2/kernel/clib.h>
+#include <psp2/kernel/processmgr.h>
+#include <psp2/power.h>
 /* Matches gfx_opengl.h's own #else branch (USE_OPENGLES isn't defined for
  * this Makefile.vita build, so that's the one actually active here). */
 #define GL_GLEXT_PROTOTYPES 1
@@ -1063,26 +1065,37 @@ static int PortInitImpl(int argc, char* argv[]) {
 		VitaPresentShaderWarmupProgress(0, kVitaEarlyShaderCount);
 
 		unsigned int earlyShaderSuccess = 0;
+		const uint32_t earlyShaderPrewarmStartUs = sceKernelGetProcessTimeLow();
 		for (unsigned int i = 0; i < kVitaEarlyShaderCount; ++i) {
 			const VitaEarlyShaderKey& key = kVitaEarlyShaders[i];
+			const uint32_t itemStartUs = sceKernelGetProcessTimeLow();
 			const bool ok = window->RunEarlyShaderSelfTest(key.id0, key.id1);
+			const uint32_t itemUs = sceKernelGetProcessTimeLow() - itemStartUs;
 			if (ok) {
 				earlyShaderSuccess++;
 			}
-			port_log("SSB64: EARLY_SHADER_PREWARM item=%u/%u result=%s "
+			port_log("SSB64: EARLY_SHADER_PREWARM item=%u/%u result=%s shader_us=%u "
 			         "id0=%016llX id1=%016llX\n",
-			         i + 1, kVitaEarlyShaderCount, ok ? "SUCCESS" : "FAIL",
+			         i + 1, kVitaEarlyShaderCount, ok ? "SUCCESS" : "FAIL", itemUs,
 			         (unsigned long long)key.id0, (unsigned long long)key.id1);
-			VitaPresentShaderWarmupProgress(i + 1, kVitaEarlyShaderCount);
+			/* A cache hit is normally much faster than one refresh interval.
+			 * Updating the display after every hit forced up to 59 unnecessary
+			 * swaps. Keep per-item feedback for real compilations, while batching
+			 * the cheap cached path. */
+			if (itemUs >= 50000U || ((i + 1U) % 8U) == 0U || i + 1U == kVitaEarlyShaderCount) {
+				VitaPresentShaderWarmupProgress(i + 1, kVitaEarlyShaderCount);
+			}
 		}
+		const uint32_t earlyShaderPrewarmUs = sceKernelGetProcessTimeLow() - earlyShaderPrewarmStartUs;
 
 		struct mallinfo shaderMiAfter = mallinfo();
 		SceKernelFreeMemorySizeInfo shaderKernelAfter = {};
 		shaderKernelAfter.size = sizeof(shaderKernelAfter);
 		sceKernelGetFreeMemorySize(&shaderKernelAfter);
-		port_log("SSB64: EARLY_SHADER_PREWARM complete success=%u failed=%u "
+		port_log("SSB64: EARLY_SHADER_PREWARM complete success=%u failed=%u elapsed_ms=%u "
 		         "newlib_arena=%u free=%u used=%u kernel_user=%u\n",
 		         earlyShaderSuccess, kVitaEarlyShaderCount - earlyShaderSuccess,
+		         earlyShaderPrewarmUs / 1000U,
 		         (unsigned int)shaderMiAfter.arena, (unsigned int)shaderMiAfter.fordblks,
 		         (unsigned int)shaderMiAfter.uordblks, (unsigned int)shaderKernelAfter.size_user);
 #endif
@@ -1126,7 +1139,7 @@ static int PortInitImpl(int argc, char* argv[]) {
 	port_capture_set_force_render_to_fb(0);
 	port_log("SSB64: Vita present experiment v5 path=direct-fb0 size=960x544 "
 	         "sdl_dimensions=forced swap=vglSwapBuffers prewarm_progress=clearbar "
-	         "shader_cache=vitagl-gxp precompiled_cache=auto msaa=1 postprocess=0\n");
+	         "shader_cache=fast3d-program-binary msaa=1 postprocess=0\n");
 #else
 	// Pin LUS to off-screen rendering so mGameFb is populated during
 	// gameplay and the GPU readback at scene transitions captures the
@@ -1499,6 +1512,47 @@ int main(int argc, char* argv[]) {
 	}
 
 #ifdef __vita__
+	/* Fast3D is CPU-bound in busy fights: hardware captures show ~25 ms of
+	 * every ~30 ms frame inside the display-list/render path, while the
+	 * buffer swap itself is ~0.14 ms. Request at least the conventional Vita
+	 * performance clocks, but never overwrite a higher PSVshell/profile
+	 * setting. The previous unconditional setters could silently downgrade a
+	 * 500 MHz CPU or overclocked GPU and slow both ShaRK prewarm and gameplay. */
+	{
+		const int armBefore = scePowerGetArmClockFrequency();
+		const int busBefore = scePowerGetBusClockFrequency();
+		const int gpuBefore = scePowerGetGpuClockFrequency();
+		const int xbarBefore = scePowerGetGpuXbarClockFrequency();
+		int armResult = 0;
+		int busResult = 0;
+		int gpuResult = 0;
+		int xbarResult = 0;
+		unsigned int appliedMask = 0;
+		if (armBefore < 444) {
+			armResult = scePowerSetArmClockFrequency(444);
+			appliedMask |= 1U;
+		}
+		if (busBefore < 222) {
+			busResult = scePowerSetBusClockFrequency(222);
+			appliedMask |= 2U;
+		}
+		if (gpuBefore < 222) {
+			gpuResult = scePowerSetGpuClockFrequency(222);
+			appliedMask |= 4U;
+		}
+		if (xbarBefore < 166) {
+			xbarResult = scePowerSetGpuXbarClockFrequency(166);
+			appliedMask |= 8U;
+		}
+		port_log("SSB64: Vita clocks before=%d/%d/%d/%d minimum=444/222/222/166 "
+		         "applied_mask=0x%X result=%d/%d/%d/%d effective=%d/%d/%d/%d MHz (arm/bus/gpu/xbar)\n",
+		         armBefore, busBefore, gpuBefore, xbarBefore,
+		         appliedMask,
+		         armResult, busResult, gpuResult, xbarResult,
+		         scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
+		         scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
+	}
+
 	/* Real-hardware testing traced a crash to newlib's malloc taking its
 	 * mmap_chunk() path for any single allocation >= DEFAULT_MMAP_THRESHOLD
 	 * (128KB, mallocr.c) - unlike ordinary sbrk-backed allocations (which
