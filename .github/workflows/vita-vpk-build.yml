@@ -89,23 +89,25 @@ jobs:
         # explicit so this workflow doesn't silently rely on that image
         # detail and still works if the default tag ever changes meaning.
         #
-        # openssl is deliberately *not* listed here even though Makefile.vita
-        # links -lssl -lcrypto. The image ships openssl-1.1.1 pre-installed,
-        # but the current vitasdk/packages VITABUILD for "openssl" pins
-        # 1.0.2 -- same pkgname, older version, and pacman treats that as a
-        # hard package conflict ("openssl-1.0.2 and openssl-1.1.1 are in
-        # conflict. Remove openssl-1.1.1? [y/N]") rather than a no-op. That
-        # prompt's default answer is N, so VDPM_NONINTERACTIVE=1's
-        # --noconfirm (which only accepts defaults, it can't answer "yes,
-        # replace") can't get past it either -- vdpm aborts with
-        # "unresolvable package conflicts detected" before any real install
-        # work happens. battleship doesn't call any OpenSSL API directly
-        # (curl is the only consumer, transitively), so the pre-installed
-        # 1.1.1 headers/libs already on the image satisfy the link step
-        # without vdpm touching the package at all.
+        # openssl WAS deliberately left off this list on the theory that
+        # battleship doesn't call OpenSSL directly and the image's
+        # pre-installed 1.1.1 would satisfy curl's transitive link needs.
+        # That was wrong: libzip's vdpm package (needed for O2R/zip
+        # extraction) links its own AES/HMAC crypto backend directly against
+        # OpenSSL, and it was built against the current vitasdk/packages
+        # "openssl" VITABUILD -- which pins 1.0.2, a different API from the
+        # image's pre-installed 1.1.1 (EVP_CIPHER_CTX_cleanup/HMAC_CTX_init/
+        # HMAC_CTX_cleanup were removed in 1.1). Linking against 1.1.1 then
+        # fails with undefined references from libzip.a's
+        # zip_crypto_openssl.c.obj. openssl is back in the install list;
+        # `yes |` forces past pacman's package-conflict prompt ("Remove
+        # openssl-1.1.1? [y/N]"), whose default answer is N -- something
+        # VDPM_NONINTERACTIVE=1's --noconfirm does not override, since
+        # --noconfirm only accepts defaults rather than answering "yes,
+        # replace".
         run: |
-          VDPM_NONINTERACTIVE=1 vdpm install \
-            bzip2 curl libmathneon libogg libpng libvorbis libzip \
+          yes | VDPM_NONINTERACTIVE=1 vdpm install \
+            bzip2 curl libmathneon libogg libpng libvorbis libzip openssl \
             sdl2 taihen xz yaml-cpp zlib vitaShaRK
 
       - name: Build SceShaccCgExt
