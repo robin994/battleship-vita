@@ -27,6 +27,7 @@
 #ifdef __vita__
 #include <malloc.h>
 #include <unistd.h>
+#include <psp2/kernel/clib.h>
 /* Matches gfx_opengl.h's own #else branch (USE_OPENGLES isn't defined for
  * this Makefile.vita build, so that's the one actually active here). */
 #define GL_GLEXT_PROTOTYPES 1
@@ -1443,7 +1444,15 @@ int main(int argc, char* argv[]) {
 		glLinkProgram(warmProg);
 		GLint warmLinked = 0;
 		glGetProgramiv(warmProg, GL_LINK_STATUS, &warmLinked);
+		/* Confirmed real-hardware nondeterminism investigating this class of
+		 * bug elsewhere (O2rArchive's ArchDiagLog): port_log alone is async
+		 * and its message can be lost if something downstream stalls or
+		 * crashes before the writer thread catches up. This runs on the
+		 * real thread specifically so we can be certain it happened - use
+		 * the same synchronous sceClibPrintf fallback rather than relying
+		 * solely on the polled log file. */
 		port_log("SSB64: shader compiler pre-warm done (linked=%d)\n", (int)warmLinked);
+		sceClibPrintf("SSB64: shader compiler pre-warm done (linked=%d)\n", (int)warmLinked);
 		glDeleteProgram(warmProg);
 		glDeleteShader(warmVsId);
 		glDeleteShader(warmFsId);
