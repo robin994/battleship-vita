@@ -49,6 +49,17 @@ jobs:
     # Full from-scratch decomp + libultraship + torch compile (~3000 TUs);
     # generous ceiling so a slow runner doesn't get killed mid-build.
     timeout-minutes: 120
+    # GitHub Actions' default shell for `run:` steps is bash on a normal
+    # Linux runner, but that default reverts to plain `sh` (dash) as soon as
+    # the job runs inside a `container:`, regardless of what shells the
+    # image actually has. This image does have bash (it's the same
+    # Arch-derived base vdpm/pacman needs), so every `set -euo pipefail`
+    # step below was failing immediately with "Illegal option -o pipefail"
+    # before ever reaching real build work. Force bash for the whole job
+    # instead of annotating each step individually.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
