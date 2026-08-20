@@ -6,10 +6,15 @@
 
 > **Work in progress: PS Vita port.** This fork adds an experimental PS Vita target
 > (`Makefile.vita`, a standalone VitaSDK build alongside the CMake build the other
-> platforms use) on top of upstream BattleShip. It builds, boots, and renders on both
-> the Vita3K emulator and real hardware, but is still under active debugging — crashes
-> during a full playthrough are expected. See [Building for PS Vita](#building-for-ps-vita)
-> below.
+> platforms use) on top of upstream BattleShip. **Video and audio are confirmed
+> working on real hardware** (and Vita3K) after root-causing a chain of boot-time
+> bugs — `SceShaccCg` shader-compiler heap starvation, a broken frame-presentation
+> path, and a stale texture-cache comparison — written up in
+> [`docs/bugs/`](docs/bugs/). Still under active debugging; crashes during a full
+> playthrough are expected, and at least one crash (a zlib/NEON issue) is still
+> open. A GitHub Actions workflow on the `ci/vita-vpk-build` branch builds an
+> installable VPK from a clean checkout, no local VitaSDK setup required. See
+> [Building for PS Vita](#building-for-ps-vita) below.
 
 **BattleShip** is a PC port of **Super Smash Bros. (N64)** — both the **US** (NTSC-U v1.0) and **Japanese** (Nintendo All-Star! Dairantou Smash Brothers) releases — built on top of the [VetriTheRetri/ssb-decomp-re](https://github.com/vetritheretri/ssb-decomp-re) decompilation, using [libultraship](https://github.com/Kenix3/libultraship) for PC-native rendering / audio / input and [Torch](https://github.com/HarbourMasters/Torch) for extracting assets out of the ROM at build time.
 
@@ -135,20 +140,43 @@ If you want to manually compile BattleShip, please consult the [building instruc
 
 ### Building for PS Vita
 
-The PS Vita target is **work in progress** and uses a standalone `Makefile.vita`
-instead of the CMake build the other platforms use — VitaSDK's toolchain doesn't fit
-this project's CMake setup cleanly, so the Vita build is hand-rolled to mirror what
-CMakeLists.txt does for every other platform.
+The PS Vita target is **work in progress** — video and audio are confirmed working
+on real hardware, but crashes during a full playthrough are expected and at least
+one (zlib/NEON-related) is still open, see [`docs/bugs/`](docs/bugs/). It uses a
+standalone `Makefile.vita` instead of the CMake build the other platforms use —
+VitaSDK's toolchain doesn't fit this project's CMake setup cleanly, so the Vita
+build is hand-rolled to mirror what CMakeLists.txt does for every other platform.
+
+#### Option A: download a build from CI (no VitaSDK setup needed)
+
+The `ci/vita-vpk-build` branch carries a GitHub Actions workflow
+(`.github/workflows/vita-vpk-build.yml`) that builds `battleship.vpk` from a clean
+checkout inside the `vitasdk/vitasdk` container image — the same environment this
+section's manual steps describe, just automated. Run it via **Actions → Vita VPK
+Build → Run workflow** (or `gh workflow run "Vita VPK Build" --ref ci/vita-vpk-build`)
+and download the `battleship-vpk` artifact from the finished run. You still need
+your own ROM (see above) and to extract `BattleShip.o2r` yourself — CI never touches
+copyrighted assets.
+
+#### Option B: build locally
 
 Prerequisites:
 
 - [VitaSDK](https://vitasdk.org) installed, with `$VITASDK` pointing at it and
   `$VITASDK/bin` on your `PATH` (needed for `vita-make-fself`, `vita-mksfoex`,
   `vita-pack-vpk`, `vita-elf-create`).
-- A build of vitaGL that predates the current upstream `vglDrawObjects` 2-arg API
-  (this codebase calls the older 3-arg form) — `Makefile.vita`'s `VITAGL_NOSPLASH_DIR`
-  variable currently points at a machine-specific path and will need adjusting to
-  wherever your own vitaGL build lives.
+- A locally-built vitaGL, **not** vitasdk's packaged one — this codebase calls the
+  older 3-argument `vglDrawObjects(mode, count, implicit_wvp)` form, which current
+  upstream vitaGL dropped in favor of a 2-argument signature. `Makefile.vita`'s
+  `VITAGL_DIR` variable points at a machine-specific path
+  (`~/.local/opt/vitadb-deps/vitaGL-nosplash` on the primary dev machine) and will
+  need adjusting to wherever your own checkout lives. That checkout also needs one
+  source patch before building: [Rinnegatamante/vitaGL](https://github.com/Rinnegatamante/vitaGL)
+  master has `#ifdef HAVE_PTRHEAD` (letters transposed) in `source/gxm.c`'s
+  GC-thread setup instead of `HAVE_PTHREAD`, plus a missing `#include <pthread.h>`
+  that typo was masking — fix both, then rebuild with
+  `HAVE_PTHREAD=1 LOG_ERRORS=1 HAVE_GLSL_TEXTURE_SIZE=1 INDICES_SPEEDHACK=1 NO_SPLASHSCREEN=1`
+  (see the CI workflow's "Build vitaGL (patched)" step for the exact `sed` used).
 - The same ROM/asset requirements as every other platform (see above) — the Vita
   build does not extract assets on-device; extract `BattleShip.o2r` with `torch` on
   desktop first (same as the other platforms) and copy it to
@@ -169,6 +197,15 @@ This produces `build/battleship.vpk` (plus the intermediate `build/battleship.el
 `build/battleship.velf`, `build/eboot.bin`, etc.) — install it with VitaShell or run
 it directly under [Vita3K](https://vita3k.org). Everything under `build/` is
 generated and gitignored; nothing there is checked into the repo.
+
+**First launch is slow on purpose.** Before any gameplay, the Vita build
+precompiles every Fast3D shader combination observed across a full boot/attract
+capture (`SceShaccCg`'s runtime compiler becomes unreliable once the game's own
+assets have consumed enough of the process heap — compiling everything early,
+while heap is still small, sidesteps that). This first-run prewarm can take two to
+three minutes and shows a progress bar; successful programs are then cached to
+`ux0:data/battleship/shader_cache`, so subsequent launches load them from disk
+instead of recompiling.
 
 ## Architecture
 
@@ -295,6 +332,41 @@ Torch is the tool that reads the ROM and emits `BattleShip.o2r`. Upstream suppor
 - `libvpk0` integration for VPK0-compressed segments
 
 Both forks live as submodules so their history stays their own and so upstream changes can be merged in cleanly when/if the fixes are accepted.
+
+### PS Vita re-forks: a further layer on top
+
+The Vita port needed real source changes beyond what any of the forks above
+already carry, so `decomp`, `libultraship`, and `torch` are each forked *again*
+onto a personal fork-of-a-fork, tracked in `.gitmodules` by a `vita-*`-prefixed
+branch:
+
+- **[`decomp`](https://github.com/robin994/ssb-decomp-re-vita/tree/vita-compat-fixes)**
+  — fork of [VetriTheRetri/ssb-decomp-re](https://github.com/vetritheretri/ssb-decomp-re).
+  Carries a `stddef.h` shim for VitaSDK's partial `__need_wint_t` support, commits
+  the US credits-text assets `tools/creditsTextConverter.py` normally generates at
+  CMake configure time (`Makefile.vita` has no equivalent codegen step, so these
+  need to already exist in the tree for a from-scratch build), and gates several
+  always-on diagnostic `port_log()` calls behind the existing
+  `PORT_RUNTIME_DIAGNOSTICS` convention instead of paying their cost on every
+  release build.
+- **[`libultraship`](https://github.com/robin994/libultraship-vita/tree/vita-rinne-merge)**
+  — fork of [`JRickey/libultraship`](https://github.com/JRickey/libultraship/tree/ssb64)
+  (itself the fork described above). Vita-only additions include: exact-size VBO
+  scratch allocation instead of a fixed 10 MiB reservation (the fixed block was
+  starving vitaGL's shared scratch pool), rendering directly into vitaGL's own
+  display framebuffer and swapping via `vglSwapBuffers()` instead of
+  `SDL_GL_SwapWindow()` (stock SDL2's Vita driver presents its own surface, not
+  vitaGL's), a fixed 960×544 window size (VitaSDK SDL2 reports 0×0 from its
+  window/drawable-size queries), the early per-shader prewarm hook
+  (`RunEarlyShaderSelfTest`), a validated on-disk shader program-binary cache
+  (replacing an unsafe one that data-aborted on real hardware), a
+  `TextureCacheKey` equality fix (was comparing uninitialized struct padding via
+  `memcmp`), and periodic aggregate perf counters (Fast3D command walk/run time,
+  draw/VBO timing, texture-cache hit rate).
+- **[`torch`](https://github.com/robin994/Torch/tree/vita-compat-fixes)** — fork of
+  [`JRickey/Torch`](https://github.com/JRickey/Torch/tree/ssb64) (itself the fork
+  described above). Currently just gitignores the `*.o`/`*.d` build artifacts
+  `Makefile.vita`'s in-tree compilation leaves scattered through the source tree.
 
 ---
 
