@@ -115,8 +115,19 @@ jobs:
         # installed pacman package name is "openssl-1.1.1" (the version is
         # baked into the package name itself, confirmed via `vdpm list -s
         # ssl`), not the bare "openssl" pkgname the 1.0.2 VITABUILD uses.
+        #
+        # A single --nodeps only skips pacman's dependency *version* check,
+        # not its "required by" reverse-dependency check -- boost, cpython,
+        # cpython3, curl, libzip, and minizip in this image's full package
+        # catalogue all formally depend on openssl-1.1.1, so removal still
+        # aborted. Passing --nodeps twice (pacman's documented way to skip
+        # both checks) is required to actually force it through. None of
+        # those five reverse-dependents are things this build invokes from
+        # the image itself (curl/libzip get reinstalled fresh against 1.0.2
+        # in the very next command; boost/cpython/cpython3/minizip are
+        # unrelated vdpm packages this Makefile.vita build never touches).
         run: |
-          VDPM_NONINTERACTIVE=1 vdpm remove openssl-1.1.1 --nodeps
+          VDPM_NONINTERACTIVE=1 vdpm remove openssl-1.1.1 --nodeps --nodeps
           VDPM_NONINTERACTIVE=1 vdpm install \
             bzip2 curl libmathneon libogg libpng libvorbis libzip openssl \
             sdl2 taihen xz yaml-cpp zlib vitaShaRK
