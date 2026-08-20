@@ -113,6 +113,9 @@ jobs:
         # /etc/pacman.conf a plain pacman invocation defaults to -- so the
         # removal has to go through `vdpm remove` too, not raw pacman.
         run: |
+          echo "--- installed packages matching ssl ---"
+          VDPM_NONINTERACTIVE=1 vdpm list -s ssl || true
+          echo "--- end listing ---"
           VDPM_NONINTERACTIVE=1 vdpm remove openssl --nodeps
           VDPM_NONINTERACTIVE=1 vdpm install \
             bzip2 curl libmathneon libogg libpng libvorbis libzip openssl \
