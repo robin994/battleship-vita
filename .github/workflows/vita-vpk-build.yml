@@ -116,12 +116,22 @@ jobs:
         # so no explicit -I/-L is needed at battleship's own link step --
         # matches how every other vdpm-provided lib in Makefile.vita's LIBS
         # is referenced by bare -l flag.
+        #
+        # -std=gnu17 is required here: this image's arm-vita-eabi-gcc is
+        # 15.2.0, whose default C dialect changed to gnu23. SceShaccCgExt's
+        # taiHEN hook macro (TAI_CONTINUE) calls through an unprototyped
+        # function-pointer type (`void *(*)()`), which pre-C23 dialects treat
+        # as "unspecified argument list" (fine) but C23 redefines as "takes no
+        # arguments" (a hard error for any call site that passes arguments).
+        # Pin the dialect this upstream code actually assumes instead of
+        # patching its source.
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/Rinnegatamante/SceShaccCgExt /tmp/SceShaccCgExt
           cmake -S /tmp/SceShaccCgExt -B /tmp/SceShaccCgExt/build \
             -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS=-std=gnu17
           cmake --build /tmp/SceShaccCgExt/build -j"$(nproc)"
           cmake --install /tmp/SceShaccCgExt/build
 
