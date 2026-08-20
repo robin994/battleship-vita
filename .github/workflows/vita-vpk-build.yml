@@ -105,11 +105,15 @@ jobs:
         # ("error: unresolvable package conflicts detected") without ever
         # reading stdin for that decision, so nothing pacman prints there is
         # actually an interactive prompt waiting on input. Remove the
-        # preinstalled 1.1.1 first (a plain pacman -R, no conflict involved
-        # since nothing else new is being installed alongside it yet) so the
-        # subsequent vdpm install of 1.0.2 has nothing left to conflict with.
+        # preinstalled 1.1.1 first (no conflict involved removing on its
+        # own) so the subsequent vdpm install of 1.0.2 has nothing left to
+        # conflict with. Bare `pacman -R` doesn't work here: vdpm wraps
+        # pacman with its own --config/--root/--dbpath pointed under
+        # $VITASDK (see vitasdk/vdpm's run_pacman helper), not the system
+        # /etc/pacman.conf a plain pacman invocation defaults to -- so the
+        # removal has to go through `vdpm remove` too, not raw pacman.
         run: |
-          pacman -R --noconfirm --nodeps openssl
+          VDPM_NONINTERACTIVE=1 vdpm remove openssl --nodeps
           VDPM_NONINTERACTIVE=1 vdpm install \
             bzip2 curl libmathneon libogg libpng libvorbis libzip openssl \
             sdl2 taihen xz yaml-cpp zlib vitaShaRK
