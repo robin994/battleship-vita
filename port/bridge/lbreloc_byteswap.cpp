@@ -29,6 +29,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <iterator>
+#include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -602,8 +605,8 @@ static std::unordered_set<uintptr_t> sStructU16Fixups;
 
 // Tracks runtime texture bases that own at least one fixed word, plus the
 // largest request size seen from that base. This preserves the old pass2/chain
-// skip behavior for exact-base matches while sTexFixupWords handles the actual
-// per-word idempotency.
+// skip behavior for exact-base matches while sTexFixupRanges handles the actual
+// overlap-safe idempotency.
 static std::unordered_map<uintptr_t, unsigned int> sTexFixupExtent;
 
 // Runtime texture/TLUT fixups can overlap even when they start at different
@@ -611,7 +614,95 @@ static std::unordered_map<uintptr_t, unsigned int> sTexFixupExtent;
 // requests a 512-byte TLUT load from each block. Track each u32 word so the
 // second overlapping load skips words fixed by the first instead of BSWAPing
 // them back to the wrong byte order.
-static std::unordered_set<uintptr_t> sTexFixupWords;
+//
+// This used to be an unordered_set with one entry and one hash lookup per u32.
+// Razor measured millions of lookups in a handful of frames: the prime-bucket
+// modulo alone consumed most of the Fast3D command walk on Vita. Store merged,
+// half-open byte ranges instead. Runtime requests are normally repeat loads of
+// the same texture, so one O(log N) containment test now replaces thousands of
+// hash lookups; partially-overlapping requests still swap only uncovered gaps.
+static std::map<uintptr_t, uintptr_t> sTexFixupRanges;
+
+static void tex_fixup_ranges_insert(uintptr_t begin, uintptr_t end)
+{
+	if (begin >= end)
+		return;
+
+	auto it = sTexFixupRanges.lower_bound(begin);
+	if (it != sTexFixupRanges.begin())
+	{
+		auto prev = std::prev(it);
+		if (prev->second >= begin)
+			it = prev;
+	}
+
+	while (it != sTexFixupRanges.end() && it->first <= end)
+	{
+		if (it->second < begin)
+		{
+			++it;
+			continue;
+		}
+		begin = std::min(begin, it->first);
+		end = std::max(end, it->second);
+		it = sTexFixupRanges.erase(it);
+	}
+	sTexFixupRanges.emplace(begin, end);
+}
+
+static bool tex_fixup_ranges_contains(uintptr_t begin, uintptr_t end)
+{
+	if (begin >= end)
+		return true;
+	auto it = sTexFixupRanges.upper_bound(begin);
+	if (it == sTexFixupRanges.begin())
+		return false;
+	--it;
+	return it->second >= end;
+}
+
+static void tex_fixup_ranges_evict(uintptr_t begin, uintptr_t end)
+{
+	if (begin >= end || sTexFixupRanges.empty())
+		return;
+
+	auto it = sTexFixupRanges.upper_bound(begin);
+	if (it != sTexFixupRanges.begin())
+		--it;
+
+	while (it != sTexFixupRanges.end())
+	{
+		const uintptr_t range_begin = it->first;
+		const uintptr_t range_end = it->second;
+		if (range_end <= begin)
+		{
+			++it;
+			continue;
+		}
+		if (range_begin >= end)
+			break;
+
+		if (range_begin < begin && range_end > end)
+		{
+			it->second = begin;
+			sTexFixupRanges.emplace(end, range_end);
+			break;
+		}
+		if (range_begin < begin)
+		{
+			it->second = begin;
+			++it;
+			continue;
+		}
+		if (range_end > end)
+		{
+			it = sTexFixupRanges.erase(it);
+			sTexFixupRanges.emplace(end, range_end);
+			break;
+		}
+		it = sTexFixupRanges.erase(it);
+	}
+}
 
 // Tracks memory ranges of decoded struct arrays that runtime texture/palette
 // BSWAPs must NOT touch. Certain N64 sprite files intentionally overlap the
@@ -640,7 +731,11 @@ static std::unordered_set<uintptr_t> sDeswizzle4cFixups;
  * unrecognizable, item spawn walks running off the array into float data
  * → textureless objects, "impossible" token warnings (byte-swapped
  * tokens), and SIGSEGV in gcSetupCustomDObjsWithMObj. */
-static std::unordered_set<uintptr_t> sChainSlotAddrs;
+// Range queries dominate at runtime: a texture load needs the first live slot
+// in [texture_begin, texture_end), not an exact-address lookup for every u32 in
+// that range. An ordered set makes that a single lower_bound plus visits only
+// actual slots. Exact lookups used by the load-time chain walk remain O(log N).
+static std::set<uintptr_t> sChainSlotAddrs;
 
 extern "C" void portRelocNoteChainSlot(const void *slot)
 {
@@ -1044,7 +1139,7 @@ extern "C" void portResetStructFixups(void)
 {
 	sStructU16Fixups.clear();
 	sTexFixupExtent.clear();
-	sTexFixupWords.clear();
+	sTexFixupRanges.clear();
 	sProtectedStructRanges.clear();
 	sDeswizzle4cFixups.clear();
 	sChainSlotAddrs.clear();
@@ -1065,9 +1160,12 @@ extern "C" void portEvictStructFixupsInRange(const void *begin, size_t size)
 		}
 	};
 	evict_set(sStructU16Fixups);
-	evict_set(sTexFixupWords);
 	evict_set(sDeswizzle4cFixups);
-	evict_set(sChainSlotAddrs);
+	tex_fixup_ranges_evict(lo, hi);
+	for (auto it = sChainSlotAddrs.lower_bound(lo);
+	     it != sChainSlotAddrs.end() && *it < hi; ) {
+		it = sChainSlotAddrs.erase(it);
+	}
 
 	for (auto it = sTexFixupExtent.begin(); it != sTexFixupExtent.end(); ) {
 		if (it->first >= lo && it->first < hi) it = sTexFixupExtent.erase(it);
@@ -1214,7 +1312,7 @@ static int chain_fixup_settimg(void *file_base, size_t file_size,
 	// BSWAP32 restores the original layout for ALL of these formats.
 	//
 	// Issue #4 (BTT/BTP arrow palette): we must record this fix in
-	// sTexFixupExtent and sTexFixupWords too. Without those, the runtime
+	// sTexFixupExtent and sTexFixupRanges too. Without those, the runtime
 	// LOADTLUT path's early-skip — which fires when a target appears in
 	// sStructU16Fixups but NOT sTexFixupExtent — locks out runtime fixup
 	// on this target. That matters when the runtime LOADTLUT loads MORE
@@ -1223,13 +1321,13 @@ static int chain_fixup_settimg(void *file_base, size_t file_size,
 	// beyond the chain-fixed range stay in pass1-BSWAP state and the
 	// arrow's palette[2] reads as 0xC17B (magenta) instead of 0x0001
 	// (black). With these two records, the runtime path now passes the
-	// early-skip and falls through to the per-word loop, which skips
-	// already-fixed words via sTexFixupWords and BSWAPs the rest.
+	// early-skip and falls through to the range-difference path, which skips
+	// already-fixed spans via sTexFixupRanges and BSWAPs the rest.
 	uintptr_t reg_base = reinterpret_cast<uintptr_t>(region);
 	for (size_t i = 0; i < num_words; i++) {
-		sTexFixupWords.insert(reg_base + i * 4);
 		region[i] = BSWAP32(region[i]);
 	}
+	tex_fixup_ranges_insert(reg_base, reg_base + tex_bytes);
 	auto extent_it = sTexFixupExtent.find(reg_base);
 	if (extent_it == sTexFixupExtent.end() || extent_it->second < tex_bytes)
 		sTexFixupExtent[reg_base] = tex_bytes;
@@ -1550,6 +1648,13 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 		return;
 	}
 
+	/* The renderer emits LOADBLOCK/LOADTILE for the same texture on nearly
+	 * every frame. If this whole request is already in native byte order, stop
+	 * here: the old per-word hash loop was still rechecking every u32 on every
+	 * load and dominated the Vita CPU trace. */
+	if (tex_fixup_ranges_contains(target, target + num_bytes))
+		return;
+
 	static unsigned int sRuntimeTexTraceCount = 0;
 	if (sRuntimeTexTraceCount < 32)
 	{
@@ -1588,10 +1693,10 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 	{
 		extern void *portRelocTryResolvePointer(uint32_t token);
 		uintptr_t scan_end = target + num_bytes;
-		for (uintptr_t w = target; w < scan_end; w += 4)
+		auto slot_it = sChainSlotAddrs.lower_bound(target);
+		while (slot_it != sChainSlotAddrs.end() && *slot_it < scan_end)
 		{
-			if (!sChainSlotAddrs.count(w))
-				continue;
+			const uintptr_t w = *slot_it;
 			/* Registry entries can outlive their file epoch: a reload at
 			 * the same address (force-heap rewind, bump reuse) evicts only
 			 * the NEW file's smaller range, leaving corpse addresses from
@@ -1602,7 +1707,7 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 			uint32_t slot_word = *reinterpret_cast<const uint32_t *>(w);
 			if (slot_word == 0 || portRelocTryResolvePointer(slot_word) == nullptr)
 			{
-				sChainSlotAddrs.erase(w);
+				slot_it = sChainSlotAddrs.erase(slot_it);
 				continue;
 			}
 			static unsigned int sClampLogCount = 0;
@@ -1621,21 +1726,54 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 			return;
 	}
 
-	uint32_t *region = reinterpret_cast<uint32_t *>(target);
-	size_t num_words = num_bytes / 4;
+	const uintptr_t fix_end = target + num_bytes;
+	const size_t num_words = num_bytes / 4;
 	size_t fixed_words = 0;
-	size_t skipped_words = 0;
-	for (size_t i = 0; i < num_words; i++)
+	uintptr_t cursor = target;
+	auto range_it = sTexFixupRanges.upper_bound(cursor);
+	if (range_it != sTexFixupRanges.begin())
 	{
-		uintptr_t word_key = target + (uintptr_t)i * 4;
-		if (sTexFixupWords.count(word_key)) {
-			skipped_words++;
+		auto prev = std::prev(range_it);
+		if (prev->second > cursor)
+			range_it = prev;
+	}
+
+	/* Swap only gaps not covered by an earlier chain/runtime fixup. The map is
+	 * kept merged, so traversal is linear in the number of overlapping ranges
+	 * (normally zero or one), not in the number of texture words. */
+	while (cursor < fix_end)
+	{
+		while (range_it != sTexFixupRanges.end() && range_it->second <= cursor)
+			++range_it;
+
+		if (range_it == sTexFixupRanges.end() || range_it->first >= fix_end)
+		{
+			for (uintptr_t word = cursor; word < fix_end; word += 4)
+			{
+				uint32_t *p = reinterpret_cast<uint32_t *>(word);
+				*p = BSWAP32(*p);
+				fixed_words++;
+			}
+			break;
+		}
+
+		if (range_it->first > cursor)
+		{
+			const uintptr_t gap_end = std::min(fix_end, range_it->first);
+			for (uintptr_t word = cursor; word < gap_end; word += 4)
+			{
+				uint32_t *p = reinterpret_cast<uint32_t *>(word);
+				*p = BSWAP32(*p);
+				fixed_words++;
+			}
+			cursor = gap_end;
 			continue;
 		}
-		sTexFixupWords.insert(word_key);
-		region[i] = BSWAP32(region[i]);
-		fixed_words++;
+
+		cursor = std::min(fix_end, range_it->second);
+		++range_it;
 	}
+	const size_t skipped_words = num_words - fixed_words;
 
 	if (fixed_words == 0)
 	{
@@ -1647,6 +1785,7 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 		}
 		return;
 	}
+	tex_fixup_ranges_insert(target, fix_end);
 
 	sStructU16Fixups.insert(target);
 	auto extent_it = sTexFixupExtent.find(target);
