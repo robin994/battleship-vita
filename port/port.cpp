@@ -1440,6 +1440,18 @@ int main(int argc, char* argv[]) {
 	 * no crash, no new coredump, log frozen at the same line) - the exact
 	 * same failure signature as the abandoned compile-retry experiment
 	 * above. Disabling fastmath/fastint makes this worse, not better. */
+	/* Tried and reverted (experiment #2): leave fastmath/fastint at vitaGL's
+	 * defaults (ruled out above) and instead drop just the optimizer level,
+	 * SHARK_OPT_FAST (O3) -> SHARK_OPT_SLOW (O0) - the most conservative
+	 * setting, disabling the most optimizer passes in one shot for a clear
+	 * signal. Real-hardware test: identical failure signature to experiment
+	 * #1 - the first real in-coroutine shader compile hung indefinitely
+	 * (280s+ waited, no crash, no new coredump, log frozen at the same
+	 * line) instead of its usual fast crash or ~13s success. Both of
+	 * vglSetupRuntimeShaderCompiler's knobs (fastmath/fastint, and opt
+	 * level) are now ruled out - any deviation from vitaGL's exact default
+	 * settings (SHARK_OPT_FAST, fastmath=1, fastprecision=0, fastint=1)
+	 * turns this shader's crash into a hang rather than fixing it. */
 	{
 		const char *warmVs = "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }";
 		const char *warmFs = "void main() { gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); }";
