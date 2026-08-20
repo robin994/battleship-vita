@@ -1429,6 +1429,17 @@ int main(int argc, char* argv[]) {
 	 * own one-time lazy setup instead of a kernel lock. Compile and link a
 	 * trivial throwaway program here, on the real thread, to force that
 	 * setup to happen somewhere safe before any coroutine exists. */
+	/* Tried and reverted: overriding SceShaccCg's optimizer settings via
+	 * vglSetupRuntimeShaderCompiler(SHARK_OPT_FAST, fastmath=0, fastprecision=0,
+	 * fastint=0) instead of vitaGL's defaults (fastmath=1, fastint=1 - see
+	 * custom_shaders.c's compiler_fastmath/compiler_fastint globals), on the
+	 * theory that an aggressive fast-math/fast-int pass might be the trigger
+	 * for SceShaccCg's internal compiler errors. Real-hardware test: the
+	 * first real in-coroutine shader compile that previously either crashed
+	 * fast or succeeded in ~13s instead hung indefinitely (4m45s+ waited,
+	 * no crash, no new coredump, log frozen at the same line) - the exact
+	 * same failure signature as the abandoned compile-retry experiment
+	 * above. Disabling fastmath/fastint makes this worse, not better. */
 	{
 		const char *warmVs = "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }";
 		const char *warmFs = "void main() { gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); }";
