@@ -99,14 +99,18 @@ jobs:
         # image's pre-installed 1.1.1 (EVP_CIPHER_CTX_cleanup/HMAC_CTX_init/
         # HMAC_CTX_cleanup were removed in 1.1). Linking against 1.1.1 then
         # fails with undefined references from libzip.a's
-        # zip_crypto_openssl.c.obj. openssl is back in the install list;
-        # `yes |` forces past pacman's package-conflict prompt ("Remove
-        # openssl-1.1.1? [y/N]"), whose default answer is N -- something
-        # VDPM_NONINTERACTIVE=1's --noconfirm does not override, since
-        # --noconfirm only accepts defaults rather than answering "yes,
-        # replace".
+        # zip_crypto_openssl.c.obj. openssl needs to go back in the install
+        # list -- but piping `yes` into vdpm does NOT get past pacman's
+        # conflict check: --noconfirm mode fails the conflict immediately
+        # ("error: unresolvable package conflicts detected") without ever
+        # reading stdin for that decision, so nothing pacman prints there is
+        # actually an interactive prompt waiting on input. Remove the
+        # preinstalled 1.1.1 first (a plain pacman -R, no conflict involved
+        # since nothing else new is being installed alongside it yet) so the
+        # subsequent vdpm install of 1.0.2 has nothing left to conflict with.
         run: |
-          yes | VDPM_NONINTERACTIVE=1 vdpm install \
+          pacman -R --noconfirm --nodeps openssl
+          VDPM_NONINTERACTIVE=1 vdpm install \
             bzip2 curl libmathneon libogg libpng libvorbis libzip openssl \
             sdl2 taihen xz yaml-cpp zlib vitaShaRK
 
