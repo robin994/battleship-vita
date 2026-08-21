@@ -347,3 +347,39 @@ objects: $(OBJS)
 clean: $(OBJS_CLEAN)
 	@rm -f $(DEPS)
 	@rm -rf build/battleship.velf build/battleship.elf build/battleship.elf.unstripped.elf $(FINAL_OBJS) build/eboot.bin build/battleship.vpk build/param.sfo
+
+# ── CSS stage asset extraction (port-introduced stages) ─────────────────────
+# port/css_icons/port_css_stage_assets.cpp loads final_destination/metal_cavern/
+# battlefield's background/icon/nameplate/emblem PNGs at runtime from
+# ux0:data/battleship/assets/css_icons/ (Ship::Context::GetAppDirectoryPath()
+# is hardcoded to "ux0:data/battleship" under __vita__). Until this target
+# exists those PNGs are never produced for a Vita build, so
+# portCSSGetStage*Sprite() always returns NULL for these three stages (their
+# fopen()/stbi_load failures against that exact path are visible in
+# ssb64.log) — that's the whole missing-name/icon symptom, unrelated to
+# Fast3D/relocation.
+#
+# CMakeLists.txt already has this exact pipeline for the desktop build (see
+# the "CSS stage asset extraction" section, ~line 1252) but it's wired only
+# into the CMake target graph, not into this Makefile. Mirrors that pipeline
+# exactly rather than reimplementing it: same script, same baserom search
+# order, same PNG set — just staged for manual FTP deploy instead of a
+# POST_BUILD copy next to a desktop binary.
+#
+# Deliberately NOT wired into `all`/`build/battleship.vpk`/`prepare`: these
+# 10 PNGs are derived from the user's own ROM and must stay off both the repo
+# and the VPK (same "no Nintendo-derived bytes shipped" rule BattleShip.o2r
+# itself follows — see CLAUDE.md's PS Vita Port section). Run this target
+# once locally, then push build/assets/css_icons/*.png to
+# ux0:data/battleship/assets/css_icons/ over the same vitacompanion FTP
+# channel already used to deploy build/eboot.bin — never through vita-pack-vpk.
+PYTHON3 ?= python3
+SSB64_BASEROM_CSS := $(firstword $(wildcard baserom.us.z64 baserom.us.n64 baserom.us.v64))
+
+css-icons:
+ifeq ($(SSB64_BASEROM_CSS),)
+	$(error CSS stage assets need baserom.us.{z64,n64,v64} in the repo root (Torch's Cartridge::Normalize handles non-z64 byte order) — see tools/derive_stage_assets.py's own header. This is ROM-derived output: generate it locally, never commit it, never add it to vita-pack-vpk)
+else
+	@mkdir -p build/assets/css_icons
+	$(PYTHON3) tools/derive_stage_assets.py $(SSB64_BASEROM_CSS) build/assets/css_icons
+endif

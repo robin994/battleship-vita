@@ -1655,24 +1655,31 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 	if (tex_fixup_ranges_contains(target, target + num_bytes))
 		return;
 
-	static unsigned int sRuntimeTexTraceCount = 0;
-	if (sRuntimeTexTraceCount < 32)
+	/* Per-file trace budget (2 lines/file, whole array ~4 KiB) instead of one
+	 * shared global counter. A global counter of 32 was entirely exhausted by
+	 * whichever handful of files loaded first (intro movies/fighters), so
+	 * stage files and later-loaded resources never got a single trace line —
+	 * hiding exactly the resources under investigation. */
 	{
 		uintptr_t descBase = 0;
 		size_t descSize = 0;
 		unsigned int descFileId = 0;
 		const char *descPath = nullptr;
 		int described = portRelocDescribePointer(addr, &descBase, &descSize, &descFileId, &descPath);
-		/* %zx silently prints as the literal characters "zx" on this
-		 * VitaSDK newlib build (its vsnprintf doesn't support the 'z'
-		 * length modifier) - every size_t field showed up as "0xzx"
-		 * instead of a real value. size_t is 32-bit on this target, so
-		 * %x with an explicit cast is equivalent and actually works. */
-		port_log("SSB64: runtimeTexFix addr=%p req=0x%x fileBase=%p fileSize=0x%x off=0x%x num=0x%x desc=%d file=%u descBase=%p descSize=0x%x path=%s\n",
-		         addr, num_bytes, (void*)fileBase, (unsigned int)fileSize, (unsigned int)target_offset, num_bytes,
-		         described, descFileId, (void*)descBase,
-		         (unsigned int)descSize, descPath ? descPath : "(unknown)");
-		sRuntimeTexTraceCount++;
+		static uint8_t sRuntimeTexTraceCountByFile[RELOC_FILE_COUNT];
+		if (descFileId < RELOC_FILE_COUNT && sRuntimeTexTraceCountByFile[descFileId] < 2)
+		{
+			sRuntimeTexTraceCountByFile[descFileId]++;
+			/* %zx silently prints as the literal characters "zx" on this
+			 * VitaSDK newlib build (its vsnprintf doesn't support the 'z'
+			 * length modifier) - every size_t field showed up as "0xzx"
+			 * instead of a real value. size_t is 32-bit on this target, so
+			 * %x with an explicit cast is equivalent and actually works. */
+			port_log("SSB64: runtimeTexFix addr=%p req=0x%x fileBase=%p fileSize=0x%x off=0x%x num=0x%x desc=%d file=%u descBase=%p descSize=0x%x path=%s\n",
+			         addr, num_bytes, (void*)fileBase, (unsigned int)fileSize, (unsigned int)target_offset, num_bytes,
+			         described, descFileId, (void*)descBase,
+			         (unsigned int)descSize, descPath ? descPath : "(unknown)");
+		}
 	}
 
 	/* Clamp the swap at the first tokenized reloc chain slot in the range.
@@ -1689,7 +1696,20 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 	 * end of trustworthy texture bytes: swap up to it, leave the rest.
 	 * The clamped tail stays in its live (already correct) byte order and
 	 * the GPU merely samples a few nonsense over-read texels the original
-	 * hardware also displayed as garbage-in-TMEM. */
+	 * hardware also displayed as garbage-in-TMEM.
+	 *
+	 * Verified case (2026-08-21): reloc_menus/MNPlayersCommon,
+	 * GateMan1PLUT (file offset 0x103f8) via RedCardSprite's
+	 * gDPLoadTLUT(nTLUT=256, ...) — clamps at 0xa0/0x200 requested. Parsed
+	 * the raw Sprite struct straight from the ROM: RedCardSprite is CI4
+	 * (bmsiz=G_IM_SIZ_4b), so only its first 16 palette entries (32 bytes)
+	 * are ever indexable; the clamp already keeps 5x that. The excluded
+	 * tail is RedCardSprite's own Sprite struct (its .LUT/.bitmap reloc
+	 * fields land at +0xd8/+0xec) — a second, unrelated over-read, not
+	 * lost texel data. Before assuming a CLAMPED hit here is the cause of
+	 * a visual bug, parse the Sprite/Bitmap's bmsiz the same way and
+	 * confirm the kept byte count is actually short of what that siz can
+	 * sample — most hits will look exactly like this one. */
 	{
 		extern void *portRelocTryResolvePointer(uint32_t token);
 		uintptr_t scan_end = target + num_bytes;
@@ -1710,14 +1730,20 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 				slot_it = sChainSlotAddrs.erase(slot_it);
 				continue;
 			}
-			static unsigned int sClampLogCount = 0;
-			if (sClampLogCount < 64)
+			/* Same per-file dedup rationale as the runtimeTexFix trace above:
+			 * one hot resource re-clamped every frame (e.g. a menu texture
+			 * drawn continuously) used to burn the entire shared 64-line
+			 * budget on itself, hiding whether any other file — a stage,
+			 * an intro model — ever clamps at all. */
+			int cl_file_id = portRelocFindFileIdAndBase(addr, nullptr);
+			static uint8_t sClampLogCountByFile[RELOC_FILE_COUNT];
+			if (cl_file_id >= 0 && (unsigned int)cl_file_id < RELOC_FILE_COUNT &&
+			    sClampLogCountByFile[cl_file_id] < 3)
 			{
-				int cl_file_id = portRelocFindFileIdAndBase(addr, nullptr);
+				sClampLogCountByFile[cl_file_id]++;
 				port_log("SSB64: runtimeTexFix CLAMPED addr=%p num=0x%x->0x%x file=%d — "
 				         "live reloc chain slot at %p bounds the texel span\n",
 				         addr, num_bytes, (unsigned int)(w - target), cl_file_id, (void *)w);
-				sClampLogCount++;
 			}
 			num_bytes = (unsigned int)(w - target);
 			break;

@@ -37,10 +37,76 @@
 
 extern "C" void vglSwapBuffers(GLboolean has_commondialog);
 
+/* Minimal 3-wide x 5-tall dot-matrix glyphs for the shader-warmup screen.
+ * No text-rendering shader exists yet at this point in boot — that's the
+ * same reason the progress bar itself is drawn with raw scissor clears
+ * instead of ImGui/Fast3D text, so glyphs use the identical technique.
+ * Only the characters needed for "LOADING" plus a live "done/total"
+ * counter are defined; anything else renders as a blank cell. */
+struct VitaGlyphRows { char ch; uint8_t rows[5]; };
+static const VitaGlyphRows kVitaGlyphs[] = {
+	{ 'L', { 0b100, 0b100, 0b100, 0b100, 0b111 } },
+	{ 'O', { 0b111, 0b101, 0b101, 0b101, 0b111 } },
+	{ 'A', { 0b010, 0b101, 0b111, 0b101, 0b101 } },
+	{ 'D', { 0b110, 0b101, 0b101, 0b101, 0b110 } },
+	{ 'I', { 0b111, 0b010, 0b010, 0b010, 0b111 } },
+	{ 'N', { 0b101, 0b111, 0b111, 0b101, 0b101 } },
+	{ 'G', { 0b111, 0b100, 0b101, 0b101, 0b111 } },
+	{ '0', { 0b111, 0b101, 0b101, 0b101, 0b111 } },
+	{ '1', { 0b010, 0b110, 0b010, 0b010, 0b111 } },
+	{ '2', { 0b111, 0b001, 0b111, 0b100, 0b111 } },
+	{ '3', { 0b111, 0b001, 0b111, 0b001, 0b111 } },
+	{ '4', { 0b101, 0b101, 0b111, 0b001, 0b001 } },
+	{ '5', { 0b111, 0b100, 0b111, 0b001, 0b111 } },
+	{ '6', { 0b111, 0b100, 0b111, 0b101, 0b111 } },
+	{ '7', { 0b111, 0b001, 0b001, 0b001, 0b001 } },
+	{ '8', { 0b111, 0b101, 0b111, 0b101, 0b111 } },
+	{ '9', { 0b111, 0b101, 0b111, 0b001, 0b111 } },
+	{ '/', { 0b001, 0b001, 0b010, 0b100, 0b100 } },
+};
+
+static const uint8_t *VitaFindGlyphRows(char c) {
+	for (const auto &g : kVitaGlyphs) {
+		if (g.ch == c) return g.rows;
+	}
+	return nullptr; // space or unsupported char: blank cell
+}
+
+/* Draws one dot-matrix string via scissored clears, no shader/font texture
+ * involved. `cell` is the pixel size of a single dot; each glyph occupies
+ * 3 dots horizontally plus a 1-dot gap before the next glyph. Assumes GL's
+ * default bottom-left-origin scissor coordinates, so row 0 (glyph top) is
+ * placed at the highest y offset within the glyph's cell. */
+static void VitaDrawDotText(const char *text, GLint x, GLint y, GLint cell, float r, float g, float b) {
+	GLint penX = x;
+	for (const char *p = text; *p; ++p) {
+		const uint8_t *rows = VitaFindGlyphRows(*p);
+		if (rows) {
+			for (int row = 0; row < 5; ++row) {
+				for (int col = 0; col < 3; ++col) {
+					if (rows[row] & (0b100 >> col)) {
+						glScissor(penX + col * cell, y + (4 - row) * cell, cell, cell);
+						glClearColor(r, g, b, 1.0f);
+						glClear(GL_COLOR_BUFFER_BIT);
+					}
+				}
+			}
+		}
+		penX += 4 * cell;
+	}
+}
+
+static GLint VitaDotTextWidth(const char *text, GLint cell) {
+	size_t len = strlen(text);
+	return len == 0 ? 0 : (GLint)(len * 4 - 1) * cell;
+}
+
 /* The shader prewarm must run before the game archives consume the remaining
  * compiler heap, but compiling every observed Fast3D program can take minutes
  * on a real Vita. Present a shader-free progress bar with scissored clears so
- * the display becomes live immediately and keeps updating during that work.
+ * the display becomes live immediately and keeps updating during that work,
+ * plus a dot-matrix "LOADING" label and a live done/total counter so the
+ * screen doesn't look frozen or crashed during a long compile.
  * Restore the scissor state expected by the OpenGL backend before returning. */
 static void VitaPresentShaderWarmupProgress(unsigned int completed, unsigned int total) {
 	constexpr GLint kWidth = 960;
@@ -50,6 +116,8 @@ static void VitaPresentShaderWarmupProgress(unsigned int completed, unsigned int
 	constexpr GLsizei kBarWidth = 720;
 	constexpr GLsizei kBarHeight = 48;
 	constexpr GLint kInset = 4;
+	constexpr GLint kGlyphCell = 6;
+	constexpr GLint kTextMargin = 16;
 
 	glViewport(0, 0, kWidth, kHeight);
 	glDisable(GL_SCISSOR_TEST);
@@ -70,6 +138,19 @@ static void VitaPresentShaderWarmupProgress(unsigned int completed, unsigned int
 		glClearColor(0.10f, 0.62f, 0.92f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT);
 	}
+
+	static const char kLabel[] = "LOADING";
+	GLint labelWidth = VitaDotTextWidth(kLabel, kGlyphCell);
+	VitaDrawDotText(kLabel, (kWidth - labelWidth) / 2,
+	                 kBarY + kBarHeight + kTextMargin, kGlyphCell,
+	                 0.78f, 0.85f, 0.95f);
+
+	char counter[16];
+	snprintf(counter, sizeof(counter), "%u/%u", completed, total);
+	GLint counterWidth = VitaDotTextWidth(counter, kGlyphCell);
+	VitaDrawDotText(counter, (kWidth - counterWidth) / 2,
+	                 kBarY - kTextMargin - 5 * kGlyphCell, kGlyphCell,
+	                 0.55f, 0.62f, 0.70f);
 
 	/* Fast3D enables scissoring during normal rendering and tracks that state
 	 * internally, so leave GL in the same state rather than invalidating its
@@ -1059,6 +1140,28 @@ static int PortInitImpl(int argc, char* argv[]) {
 			{ 0x020D020D01080108ULL, 0xFFFFFFFFFFFF0112ULL },
 			{ 0x0000000001082821ULL, 0xFFFFFFFFFFFF0001ULL },
 			{ 0x0000000080002821ULL, 0xFFFFFFFFFFFF0021ULL },
+			/* Programs first observed failing during the intro cinematic
+			 * (scenes 27-46, before the title screen) in the 62-program
+			 * hardware run's ssb64.log. By the first of these the newlib
+			 * arena had already grown past the boot-time prewarm window, so
+			 * Shark rejected them with its allocation-style internal error
+			 * the same way as the earlier late-game entries above. */
+			{ 0xD000030D01082821ULL, 0xFFFFFFFFFFFF0331ULL },
+			{ 0x0000000080002821ULL, 0xFFFFFFFFFFFF0301ULL },
+			{ 0x00000000C0001000ULL, 0xFFFFFFFFFFFF0001ULL },
+			{ 0x00000000C0001000ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x0000000010000201ULL, 0xFFFFFFFFFFFF0000ULL },
+			{ 0x0000000080000108ULL, 0xFFFFFFFFFFFF0100ULL },
+			{ 0x0000000010008000ULL, 0xFFFFFFFFFFFF0021ULL },
+			{ 0x0000000080002821ULL, 0xFFFFFFFFFFFF0121ULL },
+			/* Sibling variant of the D000030D01082821/0331 entry above
+			 * (same id1, different id0) — first observed failing mid-intro
+			 * (scene 39) in the 70-program hardware run's ssb64.log. */
+			{ 0xD000030D80002821ULL, 0xFFFFFFFFFFFF0331ULL },
+			/* First observed failing mid-match (scene 52) in the 71-program
+			 * hardware run's ssb64.log, once newlib had grown past the
+			 * boot-time prewarm window. */
+			{ 0x0000000010000108ULL, 0xFFFFFFFFFFFF0020ULL },
 		};
 		constexpr unsigned int kVitaEarlyShaderCount =
 			(unsigned int)(sizeof(kVitaEarlyShaders) / sizeof(kVitaEarlyShaders[0]));
