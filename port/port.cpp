@@ -1162,6 +1162,12 @@ static int PortInitImpl(int argc, char* argv[]) {
 			 * hardware run's ssb64.log, once newlib had grown past the
 			 * boot-time prewarm window. */
 			{ 0x0000000010000108ULL, 0xFFFFFFFFFFFF0020ULL },
+			/* Scene 54 hardware capture: this alpha-only untextured pass was
+			 * the sole late shader compile failure and was skipped entirely. */
+			{ 0x0000000080001000ULL, 0xFFFFFFFFFFFF0001ULL },
+			/* Next scene-54 hardware run reached the sibling alpha variant only
+			 * after the heap had expanded; compile it in the early window too. */
+			{ 0x0000000080001000ULL, 0xFFFFFFFFFFFF0321ULL },
 		};
 		constexpr unsigned int kVitaEarlyShaderCount =
 			(unsigned int)(sizeof(kVitaEarlyShaders) / sizeof(kVitaEarlyShaders[0]));

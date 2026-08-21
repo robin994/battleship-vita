@@ -68,6 +68,8 @@ extern "C" int portFastCaptureBackbufferPNG(const char *path);
 extern "C" void port_vi_simulate_vblank(void);
 
 extern "C" void lbBackupApplyCheats(void);
+extern "C" uint32_t portSObjTakeFrameBitmapDraws(void);
+extern "C" uint32_t portSObjTakeFrameTexrects(void);
 
 /* ========================================================================= */
 /*  External game symbols (C linkage)                                        */
@@ -902,7 +904,20 @@ void PortPushFrame(void)
 		static uint64_t perfDlUsTotal = 0;
 		static uint32_t perfFrameUsMax = 0;
 		static uint32_t perfDlUsMax = 0;
+		static uint64_t perfBitmapDrawsTotal = 0;
+		static uint64_t perfTexrectsTotal = 0;
 		static auto perfWindowStart = frameStart;
+
+		/* PERF_UI_FRAME companion counters (2026-08-21): cheap integer taps
+		 * into lbcommon.c's sprite/wallpaper draw path (SObj bitmap draws,
+		 * TEXRECTs), accumulated on the same 300-VI-frame cadence as the
+		 * line below — lets a run be classified as "more renderer workload"
+		 * vs "same workload, different FPS" without per-draw logging. See
+		 * decomp/src/lb/lbcommon.c's SOBJ_TRACE block / Makefile.vita's
+		 * SSB64_SOBJ_TRACE_DETAIL switch for the per-draw logs these are
+		 * independent of (this pair stays active in the PERF build too). */
+		perfBitmapDrawsTotal += portSObjTakeFrameBitmapDraws();
+		perfTexrectsTotal += portSObjTakeFrameTexrects();
 
 		const uint32_t frameUs = frameDurationUs > 0 ? (uint32_t)frameDurationUs : 0;
 		const auto dlDurationUs = std::chrono::duration_cast<std::chrono::microseconds>(dlEnd - dlStart).count();
@@ -922,14 +937,17 @@ void PortPushFrame(void)
 				? (uint32_t)(((uint64_t)perfFrames * 100000000ULL) / (uint64_t)wallDurationUs)
 				: 0;
 			port_log("SSB64: PERF frames=%u fps_x100=%u frame_us_avg=%u frame_us_max=%u "
-			         "dl_us_avg=%u dl_us_max=%u dl_frames=%u idle_frames=%u\n",
+			         "dl_us_avg=%u dl_us_max=%u dl_frames=%u idle_frames=%u "
+			         "sobj_bitmap_draws_avg=%u sobj_texrects_avg=%u\n",
 			         perfFrames, fpsX100,
 			         (uint32_t)(perfFrameUsTotal / perfFrames), perfFrameUsMax,
 			         (uint32_t)(perfDlUsTotal / perfFrames), perfDlUsMax,
-			         perfDlFrames, perfIdleFrames);
+			         perfDlFrames, perfIdleFrames,
+			         (uint32_t)(perfBitmapDrawsTotal / perfFrames), (uint32_t)(perfTexrectsTotal / perfFrames));
 			perfFrames = perfDlFrames = perfIdleFrames = 0;
 			perfFrameUsTotal = perfDlUsTotal = 0;
 			perfFrameUsMax = perfDlUsMax = 0;
+			perfBitmapDrawsTotal = perfTexrectsTotal = 0;
 			perfWindowStart = frameEnd;
 		}
 	}

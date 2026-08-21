@@ -265,7 +265,17 @@ PREFIX = arm-vita-eabi
 CC  = $(PREFIX)-gcc
 CXX = $(PREFIX)-g++
 
+# DEBUG (1, default) vs PERF (0) build switch for the M/wallpaper visual-defect
+# investigation's per-draw SObj/wallpaper-capture instrumentation (see
+# decomp/src/lb/lbcommon.c's SOBJ_TRACE block). 0 keeps the always-on
+# SOBJ_SCENE_COUNTS/VISDRAW_* aggregate counters but silences every
+# per-bitmap/per-draw port_log call, to separate "instrumentation overhead"
+# from "real renderer workload" when comparing FPS across hardware runs.
+# Override with: make -f Makefile.vita SSB64_SOBJ_TRACE_DETAIL=0 ...
+SSB64_SOBJ_TRACE_DETAIL ?= 1
+
 CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-short-enums -fsigned-char -MMD -MP \
+	-DSSB64_SOBJ_TRACE_DETAIL=$(SSB64_SOBJ_TRACE_DETAIL) \
 	-I$(VITAGL_DIR)/source \
 	$(foreach dir,$(INCLUDES),-I$(dir)) -fno-strict-aliasing -DMA_NO_RUNTIME_LINKING \
 	-DNDEBUG \

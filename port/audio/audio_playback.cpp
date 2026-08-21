@@ -18,6 +18,7 @@
 #include <libultraship/bridge/audiobridge.h>
 
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -35,6 +36,32 @@ static constexpr int32_t MAX_SAMPLES_STEREO = SAMPLES_PER_FRAME_HIGH * 2;
 // Persistent silence buffer — zeroed once, reused every frame.
 static int16_t sSilenceBuf[MAX_SAMPLES_STEREO];
 static bool    sInitialized = false;
+
+struct AudioDiagnostics {
+    uint32_t bufferRequests = 0;
+    uint32_t underruns = 0;
+    uint64_t callbackTimeUsTotal = 0;
+    uint32_t callbackTimeUsMax = 0;
+    uint32_t callbackIntervals = 0;
+    uint64_t mixTimeUsTotal = 0;
+    uint32_t mixTimeUsMax = 0;
+    uint64_t submitTimeUsTotal = 0;
+    uint32_t submitTimeUsMax = 0;
+    uint64_t bufferedBeforeTotal = 0;
+    int32_t bufferedBeforeMin = INT32_MAX;
+    int32_t bufferedBeforeMax = 0;
+    int32_t bufferedAfter = 0;
+    uint32_t pendingMixTimeUs = 0;
+    std::chrono::steady_clock::time_point previousSubmit;
+    bool hasPreviousSubmit = false;
+};
+
+static AudioDiagnostics sAudioDiagnostics;
+
+extern "C" void portAudioRecordMixTime(unsigned int mixTimeUs)
+{
+    sAudioDiagnostics.pendingMixTimeUs = mixTimeUs;
+}
 
 extern "C" void portAudioPushSilence(void)
 {
@@ -210,6 +237,28 @@ extern "C" void portAudioSubmitFrame(const void *buf, int sampleCount)
         return;
     }
 
+    const auto submitStart = std::chrono::steady_clock::now();
+    const int32_t bufferedBefore = AudioPlayerBuffered();
+    AudioDiagnostics& diag = sAudioDiagnostics;
+
+    if (diag.hasPreviousSubmit) {
+        const auto intervalUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            submitStart - diag.previousSubmit).count();
+        const uint32_t clampedIntervalUs = intervalUs > 0 ? static_cast<uint32_t>(intervalUs) : 0;
+        diag.callbackTimeUsTotal += clampedIntervalUs;
+        diag.callbackIntervals++;
+        if (clampedIntervalUs > diag.callbackTimeUsMax) diag.callbackTimeUsMax = clampedIntervalUs;
+        if (bufferedBefore == 0) diag.underruns++;
+    }
+    diag.previousSubmit = submitStart;
+    diag.hasPreviousSubmit = true;
+    diag.bufferRequests++;
+    diag.bufferedBeforeTotal += bufferedBefore > 0 ? static_cast<uint32_t>(bufferedBefore) : 0;
+    if (bufferedBefore < diag.bufferedBeforeMin) diag.bufferedBeforeMin = bufferedBefore;
+    if (bufferedBefore > diag.bufferedBeforeMax) diag.bufferedBeforeMax = bufferedBefore;
+    diag.mixTimeUsTotal += diag.pendingMixTimeUs;
+    if (diag.pendingMixTimeUs > diag.mixTimeUsMax) diag.mixTimeUsMax = diag.pendingMixTimeUs;
+
     // n_alAudioFrame produces interleaved stereo s16 PCM.
     // Total bytes = sampleCount * 2 channels * 2 bytes per sample.
     size_t byteLen = (size_t)sampleCount * 4;
@@ -241,4 +290,31 @@ extern "C" void portAudioSubmitFrame(const void *buf, int sampleCount)
     wavAppend(pcm, byteLen);
 
     AudioPlayerPlayFrame(reinterpret_cast<const uint8_t*>(pcm), byteLen);
+
+    diag.bufferedAfter = AudioPlayerBuffered();
+    const auto submitTimeUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - submitStart).count();
+    const uint32_t clampedSubmitTimeUs = submitTimeUs > 0 ? static_cast<uint32_t>(submitTimeUs) : 0;
+    diag.submitTimeUsTotal += clampedSubmitTimeUs;
+    if (clampedSubmitTimeUs > diag.submitTimeUsMax) diag.submitTimeUsMax = clampedSubmitTimeUs;
+
+    if ((diag.bufferRequests % 300U) == 0U) {
+        const uint32_t intervalCount = diag.callbackIntervals > 0 ? diag.callbackIntervals : 1;
+        port_log("SSB64: AUDIO: buffer_requests=%u underruns=%u callback_time_us_avg=%u "
+                 "callback_time_us_max=%u mix_time_us_avg=%u mix_time_us_max=%u "
+                 "submit_time_us_avg=%u submit_time_us_max=%u buffered_before_min=%d "
+                 "buffered_before_avg=%u buffered_before_max=%d buffered_after=%d desired=%d\n",
+                 diag.bufferRequests, diag.underruns,
+                 static_cast<unsigned>(diag.callbackTimeUsTotal / intervalCount), diag.callbackTimeUsMax,
+                 static_cast<unsigned>(diag.mixTimeUsTotal / diag.bufferRequests), diag.mixTimeUsMax,
+                 static_cast<unsigned>(diag.submitTimeUsTotal / diag.bufferRequests), diag.submitTimeUsMax,
+                 diag.bufferedBeforeMin == INT32_MAX ? 0 : diag.bufferedBeforeMin,
+                 static_cast<unsigned>(diag.bufferedBeforeTotal / diag.bufferRequests),
+                 diag.bufferedBeforeMax, diag.bufferedAfter, AudioPlayerGetDesiredBuffered());
+
+        const auto previousSubmit = diag.previousSubmit;
+        diag = AudioDiagnostics{};
+        diag.previousSubmit = previousSubmit;
+        diag.hasPreviousSubmit = true;
+    }
 }

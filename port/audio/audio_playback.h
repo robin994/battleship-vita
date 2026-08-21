@@ -15,6 +15,9 @@ void portAudioPushSilence(void);
 // Total bytes submitted = sampleCount * 2 (channels) * 2 (bytes per s16).
 void portAudioSubmitFrame(const void *buf, int sampleCount);
 
+// Record the CPU mixer duration associated with the next submitted frame.
+void portAudioRecordMixTime(unsigned int mixTimeUs);
+
 #ifdef __cplusplus
 }
 #endif

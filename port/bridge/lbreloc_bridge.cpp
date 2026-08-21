@@ -128,9 +128,22 @@ struct PortRelocFileRange
 	size_t size;
 	u32 file_id;
 	const char *path;
+	int location = nLBFileLocationDefault;
+	bool ready = true;
 };
 
 static std::vector<PortRelocFileRange> sPortRelocFileRanges;
+
+struct PortRelocForceBatch
+{
+	uintptr_t heap_base;
+	uintptr_t heap_end;
+};
+
+static std::vector<PortRelocForceBatch> sPortRelocForceBatches;
+
+static void portStatusBufferEvictRange(LBFileNode *entries, s32 *p_num,
+                                       uintptr_t lo, uintptr_t hi);
 
 static void portRelocEvictFileRangesInRange(void *base, size_t size)
 {
@@ -151,6 +164,8 @@ static void portRelocEvictFileRangesInRange(void *base, size_t size)
 		uintptr_t re = rb + r.size;
 		if ((r.size != 0) && (rb < end) && (begin < re)) {
 			port_dl_range_unregister(reinterpret_cast<const void*>(rb));
+			port_log("SSB64: RESOURCE_FREE name=%s address=%p reason=heap-reuse\n",
+			         r.path ? r.path : "(unknown)", reinterpret_cast<void*>(rb));
 		}
 	}
 
@@ -193,6 +208,158 @@ static void portStatusBufferEvictRange(LBFileNode *entries, s32 *p_num,
 	}
 }
 
+static void portStatusBufferRemoveFile(LBFileNode *entries, s32 *p_num,
+                                       u32 id, const void *addr)
+{
+	if (entries == nullptr || p_num == nullptr) return;
+	for (s32 i = 0; i < *p_num;)
+	{
+		if (entries[i].id == id && entries[i].addr == addr)
+		{
+			entries[i] = entries[*p_num - 1];
+			(*p_num)--;
+		}
+		else
+		{
+			i++;
+		}
+	}
+}
+
+static const PortRelocFileRange *portRelocFindFileRange(u32 file_id, const void *base)
+{
+	for (auto it = sPortRelocFileRanges.rbegin(); it != sPortRelocFileRanges.rend(); ++it)
+	{
+		if (it->ready && it->file_id == file_id && it->base == reinterpret_cast<uintptr_t>(base))
+		{
+			return &*it;
+		}
+	}
+	return nullptr;
+}
+
+static const PortRelocFileRange *portRelocFindFileRangeAnyState(u32 file_id, const void *base)
+{
+	for (auto it = sPortRelocFileRanges.rbegin(); it != sPortRelocFileRanges.rend(); ++it)
+	{
+		if (it->file_id == file_id && it->base == reinterpret_cast<uintptr_t>(base))
+		{
+			return &*it;
+		}
+	}
+	return nullptr;
+}
+
+static void *portRelocFindValidStatusBufferFile(LBFileNode *entries, s32 *p_num,
+	                                             u32 id, int requested_location)
+{
+	if (entries == nullptr || p_num == nullptr) return nullptr;
+
+	for (s32 i = 0; i < *p_num;)
+	{
+		if (entries[i].id != id)
+		{
+			i++;
+			continue;
+		}
+
+		void *addr = entries[i].addr;
+		const PortRelocFileRange *range = portRelocFindFileRange(id, addr);
+		if (range != nullptr)
+		{
+			return addr;
+		}
+
+		const PortRelocFileRange *any_range = portRelocFindFileRangeAnyState(id, addr);
+		static u32 s_stale_get_log_count = 0;
+		if (s_stale_get_log_count < 128)
+		{
+			port_log("SSB64: RESOURCE_GET id=%u address=%p requested_location=%d "
+			         "registered_location=%d ready=%s range_valid=no action=evict-status\n",
+			         id, addr, requested_location,
+			         any_range ? any_range->location : -1,
+			         (any_range && any_range->ready) ? "yes" : "no");
+			s_stale_get_log_count++;
+		}
+
+		entries[i] = entries[*p_num - 1];
+		(*p_num)--;
+	}
+	return nullptr;
+}
+
+static void portRelocForgetForceBatchesInRange(const void *base, size_t size)
+{
+	if (base == nullptr || size == 0) return;
+	uintptr_t lo = reinterpret_cast<uintptr_t>(base);
+	uintptr_t hi = lo + size;
+	sPortRelocForceBatches.erase(
+		std::remove_if(sPortRelocForceBatches.begin(), sPortRelocForceBatches.end(),
+			[lo, hi](const PortRelocForceBatch &batch) {
+				return batch.heap_base < hi && lo < batch.heap_end;
+			}),
+		sPortRelocForceBatches.end());
+}
+
+static void portRelocEvictForceBatch(uintptr_t heap_base)
+{
+	auto batch_it = std::find_if(sPortRelocForceBatches.begin(), sPortRelocForceBatches.end(),
+		[heap_base](const PortRelocForceBatch &batch) { return batch.heap_base == heap_base; });
+	if (batch_it == sPortRelocForceBatches.end()) return;
+
+	const uintptr_t batch_begin = batch_it->heap_base;
+	const uintptr_t batch_end = batch_it->heap_end;
+	extern "C" void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
+	extern "C" void portTextureCacheDeleteRange(const void *base, size_t size);
+	extern "C" void portEvictStructFixupsInRange(const void *base, size_t size);
+
+	for (const auto &range : sPortRelocFileRanges)
+	{
+		uintptr_t range_end = range.base + range.size;
+		if (range.location != nLBFileLocationForce || range.size == 0 ||
+		    range.base >= batch_end || batch_begin >= range_end)
+		{
+			continue;
+		}
+
+		void *range_base = reinterpret_cast<void *>(range.base);
+		portPackedDisplayListCacheDeleteRange(range_base, range.size);
+		portTextureCacheDeleteRange(range_base, range.size);
+		portEvictStructFixupsInRange(range_base, range.size);
+		portRelocInvalidateRange(range_base, range.size);
+		portStatusBufferRemoveFile(sLBRelocInternBuffer.force_status_buffer,
+		                           &sLBRelocInternBuffer.force_status_buffer_num,
+		                           range.file_id, range_base);
+		port_dl_range_unregister(range_base);
+		port_log("SSB64: RESOURCE_FREE name=%s address=%p reason=force-rewind\n",
+		         range.path ? range.path : "(unknown)", range_base);
+	}
+
+	sPortRelocFileRanges.erase(
+		std::remove_if(sPortRelocFileRanges.begin(), sPortRelocFileRanges.end(),
+			[batch_begin, batch_end](const PortRelocFileRange &range) {
+				uintptr_t range_end = range.base + range.size;
+				return range.location == nLBFileLocationForce && range.size != 0 &&
+				       range.base < batch_end && batch_begin < range_end;
+			}),
+		sPortRelocFileRanges.end());
+	sPortRelocForceBatches.erase(batch_it);
+}
+
+static void portRelocRecordForceBatch(uintptr_t heap_base, uintptr_t heap_end)
+{
+	if (heap_end <= heap_base) return;
+	for (auto &batch : sPortRelocForceBatches)
+	{
+		if (batch.heap_base == heap_base)
+		{
+			batch.heap_end = heap_end;
+			return;
+		}
+	}
+	sPortRelocForceBatches.push_back({ heap_base, heap_end });
+}
+
 /* Called by syTaskmanStartTask before reusing the scene arena for the next
  * scene. Evicts every port-side cache that may hold a pointer into the old
  * arena's contents (DL widening, texture upload, struct fixup, reloc file
@@ -201,13 +368,14 @@ static void portStatusBufferEvictRange(LBFileNode *entries, s32 *p_num,
 extern "C" void port_taskman_evict_arena_caches(const void *base, size_t size)
 {
 	if ((base == nullptr) || (size == 0)) return;
-	extern void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
-	extern void portTextureCacheDeleteRange(const void *base, size_t size);
-	extern void portEvictStructFixupsInRange(const void *base, size_t size);
+	extern "C" void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
+	extern "C" void portTextureCacheDeleteRange(const void *base, size_t size);
+	extern "C" void portEvictStructFixupsInRange(const void *base, size_t size);
 	portPackedDisplayListCacheDeleteRange(base, size);
 	portTextureCacheDeleteRange(base, size);
 	portEvictStructFixupsInRange(base, size);
 	portRelocEvictFileRangesInRange(const_cast<void *>(base), size);
+	portRelocForgetForceBatchesInRange(base, size);
 	/* Structural fix: invalidate tokens whose pointers fall in the recycled
 	 * scene arena. With the per-slot generational model in RelocPointerTable
 	 * .cpp, this NULLs only the affected slots (bumping their generation)
@@ -388,6 +556,20 @@ static std::shared_ptr<RelocFile> portLoadRelocResource(u32 file_id)
 #endif
 		}
 		spdlog::error("lbReloc bridge: failed to load '{}' (file_id={})", path, file_id);
+		/* spdlog has zero sinks on Vita (see Context::InitLogging / the
+		 * comment above portRelocLoadFileFromBytes), so without this line
+		 * every non-first reloc-load failure is completely invisible on
+		 * real hardware. Throttled so a fully-stale archive can't flood
+		 * the log (the first failure still takes the _exit path above). */
+		{
+			static uint32_t s_reloc_load_fail_count = 0;
+			if ((s_reloc_load_fail_count & 0xFF) == 0)
+			{
+				port_log("SSB64: RESOURCE_LOAD status=FAIL file_id=%u path=%s count=%u\n",
+				         file_id, path.c_str(), s_reloc_load_fail_count);
+			}
+			s_reloc_load_fail_count++;
+		}
 		return nullptr;
 	}
 
@@ -412,20 +594,9 @@ extern "C" {
 
 void* lbRelocFindStatusBufferFile(u32 id)
 {
-	s32 i;
-
-	if (sLBRelocInternBuffer.status_buffer_num == 0)
-	{
-		return NULL;
-	}
-	else for (i = 0; i < sLBRelocInternBuffer.status_buffer_num; i++)
-	{
-		if (id == sLBRelocInternBuffer.status_buffer[i].id)
-		{
-			return sLBRelocInternBuffer.status_buffer[i].addr;
-		}
-	}
-	return NULL;
+	return portRelocFindValidStatusBufferFile(sLBRelocInternBuffer.status_buffer,
+	                                         &sLBRelocInternBuffer.status_buffer_num,
+	                                         id, nLBFileLocationDefault);
 }
 
 void* lbRelocGetStatusBufferFile(u32 id)
@@ -435,18 +606,10 @@ void* lbRelocGetStatusBufferFile(u32 id)
 
 void* lbRelocFindForceStatusBufferFile(u32 id)
 {
-	s32 i;
-
-	if (sLBRelocInternBuffer.force_status_buffer_num != 0)
-	{
-		for (i = 0; i < sLBRelocInternBuffer.force_status_buffer_num; i++)
-		{
-			if (id == sLBRelocInternBuffer.force_status_buffer[i].id)
-			{
-				return sLBRelocInternBuffer.force_status_buffer[i].addr;
-			}
-		}
-	}
+	void *file = portRelocFindValidStatusBufferFile(sLBRelocInternBuffer.force_status_buffer,
+	                                               &sLBRelocInternBuffer.force_status_buffer_num,
+	                                               id, nLBFileLocationForce);
+	if (file != NULL) return file;
 	return lbRelocFindStatusBufferFile(id);
 }
 
@@ -536,6 +699,24 @@ extern "C" void portRelocLoadFileFromBytes(
 		force_figatree_fixup || portRelocIsFighterFigatreeFile(file_id);
 	std::vector<uint8_t> figatree_reloc_words;
 	const char *table_path = (file_id < RELOC_FILE_COUNT) ? gRelocFileTable[file_id] : nullptr;
+	bool load_ok = true;
+	const char *failure_reason = nullptr;
+
+	// CRASH INVESTIGATION (2026-08-21): SceLibKernel data abort, PC inside
+	// this function, fault address=0x6f92a60, immediately after
+	// "[ground] InitGroundData scene=54 gkind=16 file_id=266" (Final
+	// Destination). spdlog::error/warn calls throughout this function have
+	// ZERO sinks wired on Vita (no file/console sink for __vita__ — see
+	// Context::InitLogging), so every existing corruption-detection log
+	// below (chain-walk-stop, OOB target, extern overrun) has been
+	// completely invisible on real hardware until now. This entry log is
+	// unconditional (not gated behind SSB64_LOG_LBRELOC_LOAD) so the crash
+	// site's inputs are always captured, not just when that env var happens
+	// to be set for a debug run.
+	port_log("SSB64: RELOC_LOAD_ENTRY file_id=%u path=%s input_bytes=%p input_size=%u "
+	         "allocation_result=%p allocation_size=%u reloc_table_offset=%u,%u extern_count=%u data_base=%p\n",
+	         file_id, table_path ? table_path : "(null)", src_bytes, src_size, ram_dst, bytes_num,
+	         (unsigned)reloc_intern_offset, (unsigned)reloc_extern_offset, extern_count, ram_dst);
 
 	// Gated: SSB64_LOG_LBRELOC_LOAD=1 logs every file load. Helpful when
 	// tracing which reloc files are loaded per scene.
@@ -553,6 +734,19 @@ extern "C" void portRelocLoadFileFromBytes(
 	if (src_bytes == nullptr || src_size == 0)
 	{
 		spdlog::error("portRelocLoadFileFromBytes: NULL/empty src for file_id {}", file_id);
+		port_log("SSB64: RELOC_LOAD_ABORT file_id=%u reason=null-or-empty-src input_bytes=%p input_size=%u\n",
+		         file_id, src_bytes, src_size);
+		return;
+	}
+
+	if (ram_dst == nullptr)
+	{
+		// Guard: the crash's fault address strongly suggests a bad dst.
+		// This can't be recovered here (caller already committed to this
+		// allocation), but it's better to log and bail than to memcpy into
+		// a null/garbage pointer and data-abort with no trace at all.
+		port_log("SSB64: RELOC_LOAD_ABORT file_id=%u reason=null-allocation_result input_size=%u "
+		         "allocation_size=%u\n", file_id, src_size, bytes_num);
 		return;
 	}
 
@@ -562,6 +756,8 @@ extern "C" void portRelocLoadFileFromBytes(
 	{
 		spdlog::warn("lbReloc bridge: file_id {} data ({} bytes) exceeds "
 		             "buffer ({} bytes), truncating", file_id, copySize, bytes_num);
+		port_log("SSB64: RELOC_LOAD_TRUNCATE file_id=%u input_size=%u allocation_size=%u\n",
+		         file_id, (unsigned)src_size, bytes_num);
 		copySize = bytes_num;
 	}
 	if (is_fighter_figatree)
@@ -582,16 +778,18 @@ extern "C" void portRelocLoadFileFromBytes(
 	// reused heap address would otherwise hit a stale cached upload from
 	// the prior file. Symptom: scene 45 (DK+Samus Kongo Jungle) renders
 	// the prior scene's wallpaper. See docs/dk_intro_wallpaper_*.md
-	extern void portTextureCacheDeleteRange(const void *base, size_t size);
+	extern "C" void portTextureCacheDeleteRange(const void *base, size_t size);
 	portTextureCacheDeleteRange(ram_dst, copySize);
 	// Evict cached packed-DL widenings whose source pointer falls in the
 	// range we're about to overwrite. Without this, the widening cache
 	// hands back a vector with stale fileBase/fileSize, segment-0E sub-DL
 	// references resolve to the prior file's address window, and the
 	// interpreter walks garbage — fingerprint of issue #103/#128.
-	extern void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
+	extern "C" void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
 	portPackedDisplayListCacheDeleteRange(ram_dst, copySize);
 	portRelocEvictFileRangesInRange(ram_dst, copySize);
+	port_log("SSB64: RELOC_MEMCPY_GUARD file_id=%u dst=%p src=%p size=%u allocation_size=%u\n",
+	         file_id, ram_dst, src_bytes, (unsigned)copySize, bytes_num);
 	memcpy(ram_dst, src_bytes, copySize);
 
 	/* lbRelocGetExternHeapFile sets sLBRelocExternFileHeap = heap so that
@@ -657,7 +855,8 @@ extern "C" void portRelocLoadFileFromBytes(
 		lbRelocAddStatusBufferFile(file_id, ram_dst);
 	}
 
-	sPortRelocFileRanges.push_back({ reinterpret_cast<uintptr_t>(ram_dst), copySize, file_id, table_path });
+	sPortRelocFileRanges.push_back({ reinterpret_cast<uintptr_t>(ram_dst), copySize, file_id,
+	                                 table_path, loc, false });
 
 	/* Mirror this range into the DL-range registry so gfx_step's bounds
 	 * check accepts DLs resolved through reloc files. Path string from
@@ -695,6 +894,8 @@ extern "C" void portRelocLoadFileFromBytes(
 			              file_id, reloc_intern, intern_steps, copySize);
 			port_log("SSB64: chainWalk STOP intern file=%u off=0x%x steps=%u size=0x%x\n",
 			         file_id, (unsigned)reloc_intern, (unsigned)intern_steps, (unsigned int)copySize);
+			load_ok = false;
+			failure_reason = "intern-chain-oob";
 			break;
 		}
 		u32 *slot = (u32 *)((uintptr_t)ram_dst + (reloc_intern * sizeof(u32)));
@@ -716,6 +917,8 @@ extern "C" void portRelocLoadFileFromBytes(
 			              file_id, reloc_intern, words_num, copySize);
 			port_log("SSB64: chainWalk STOP intern-target-oob file=%u slot=0x%x tgt=0x%x size=0x%x\n",
 			         file_id, (unsigned)reloc_intern, (unsigned)words_num, (unsigned int)copySize);
+			load_ok = false;
+			failure_reason = "intern-target-oob";
 			break;
 		}
 
@@ -764,6 +967,25 @@ extern "C" void portRelocLoadFileFromBytes(
 	u32 extern_idx = 0;
 	u32 extern_steps = 0;
 
+	// Malformed-metadata check: dump the extern dependency file-id list this
+	// file declares before walking its chain, so a garbage/truncated
+	// extern_file_ids array (as opposed to a bad chain word inside the
+	// file's own data) is visible directly rather than inferred from where
+	// the walk eventually stops.
+	{
+		char extern_ids_buf[192];
+		size_t off = 0;
+		extern_ids_buf[0] = '\0';
+		for (unsigned int i = 0; i < extern_count && off + 8 < sizeof(extern_ids_buf); i++) {
+			int n = snprintf(extern_ids_buf + off, sizeof(extern_ids_buf) - off, "%u,", (unsigned)extern_file_ids[i]);
+			if (n > 0) {
+				off += (size_t)n;
+			}
+		}
+		port_log("SSB64: RELOC_EXTERN_IDS file_id=%u extern_count=%u ids=%s\n", file_id, extern_count,
+		         extern_ids_buf);
+	}
+
 	while (reloc_extern != 0xFFFF)
 	{
 		/* Same containment as the intern walk: slots must lie inside this
@@ -778,6 +1000,8 @@ extern "C" void portRelocLoadFileFromBytes(
 			              file_id, reloc_extern, extern_steps, copySize);
 			port_log("SSB64: chainWalk STOP extern file=%u off=0x%x steps=%u size=0x%x\n",
 			         file_id, (unsigned)reloc_extern, (unsigned)extern_steps, (unsigned int)copySize);
+			load_ok = false;
+			failure_reason = "extern-chain-oob";
 			break;
 		}
 		u32 *slot = (u32 *)((uintptr_t)ram_dst + (reloc_extern * sizeof(u32)));
@@ -790,6 +1014,10 @@ extern "C" void portRelocLoadFileFromBytes(
 			spdlog::error("lbReloc bridge: file_id {} extern reloc overrun "
 			              "(idx={}, count={})", file_id, extern_idx,
 			              extern_count);
+			port_log("SSB64: RELOC_EXTERN_OVERRUN file_id=%u extern_idx=%u extern_count=%u\n", file_id,
+			         extern_idx, extern_count);
+			load_ok = false;
+			failure_reason = "extern-metadata-overrun";
 			break;
 		}
 
@@ -823,10 +1051,42 @@ extern "C" void portRelocLoadFileFromBytes(
 			}
 		}
 
-		// Compute target pointer (offset into the dependency file's data)
-		void *target = (void *)((uintptr_t)vaddr_extern + (words_num * sizeof(u32)));
+		// Guard: no null check previously existed here. A malformed/garbage
+		// dep_file_id (from a corrupt extern_file_ids array — see
+		// RELOC_EXTERN_IDS above) or a dependency load failure both surface
+		// as vaddr_extern==NULL, and without this check `target` silently
+		// becomes a near-null pointer (0 + words_num*4) that gets tokenized
+		// and dereferenced far later, in an unrelated call stack — exactly
+		// the kind of "crash happens somewhere else entirely" symptom that
+		// makes this class of bug hard to trace back to its real cause.
+		// Abort the parent load instead of publishing a resource with a null or
+		// near-null token in one of its required external slots.
+		u32 token;
+		if (vaddr_extern == NULL)
+		{
+			port_log("SSB64: RELOC_EXTERN_TARGET_NULL file_id=%u extern_idx=%u dep_file_id=%u loc=%d "
+			         "words_num=%u\n", file_id, extern_idx, (unsigned)dep_file_id, loc, (unsigned)words_num);
+			load_ok = false;
+			failure_reason = "extern-dependency-null";
+			break;
+		}
 
-		u32 token = portRelocRegisterPointer(target);
+		const PortRelocFileRange *dep_range = portRelocFindFileRange(dep_file_id, vaddr_extern);
+		size_t target_offset = (size_t)words_num * sizeof(u32);
+		if (dep_range == nullptr || target_offset >= dep_range->size)
+		{
+			port_log("SSB64: RELOC_EXTERN_TARGET_OOB file_id=%u extern_idx=%u dep_file_id=%u "
+			         "target_offset=%u dep_size=%u dep_address=%p\n",
+			         file_id, extern_idx, (unsigned)dep_file_id, (unsigned)target_offset,
+			         dep_range ? (unsigned)dep_range->size : 0U, vaddr_extern);
+			load_ok = false;
+			failure_reason = dep_range ? "extern-target-oob" : "extern-dependency-unregistered";
+			break;
+		}
+
+		// Compute target pointer (offset into the dependency file's data)
+		void *target = (void *)((uintptr_t)vaddr_extern + target_offset);
+		token = portRelocRegisterPointer(target);
 
 		if (is_fighter_figatree && (reloc_extern < figatree_reloc_words.size()))
 		{
@@ -837,6 +1097,39 @@ extern "C" void portRelocLoadFileFromBytes(
 
 		extern_idx++;
 		reloc_extern = next_reloc;
+	}
+
+	if (!load_ok)
+	{
+		if (loc == nLBFileLocationForce)
+		{
+			portStatusBufferRemoveFile(sLBRelocInternBuffer.force_status_buffer,
+			                           &sLBRelocInternBuffer.force_status_buffer_num,
+			                           file_id, ram_dst);
+		}
+		else
+		{
+			portStatusBufferRemoveFile(sLBRelocInternBuffer.status_buffer,
+			                           &sLBRelocInternBuffer.status_buffer_num,
+			                           file_id, ram_dst);
+		}
+		portRelocInvalidateRange(ram_dst, copySize);
+		portRelocEvictFileRangesInRange(ram_dst, copySize);
+		port_log("SSB64: RESOURCE_LOAD name=%s size=%u address=%p reloc_count=%u status=FAIL "
+		         "deps=%u reason=%s\n",
+		         table_path ? table_path : "(mod)", (unsigned)copySize, ram_dst,
+		         (unsigned)(intern_steps + extern_steps), extern_count,
+		         failure_reason ? failure_reason : "unknown");
+		return;
+	}
+
+	for (auto it = sPortRelocFileRanges.rbegin(); it != sPortRelocFileRanges.rend(); ++it)
+	{
+		if (it->file_id == file_id && it->base == reinterpret_cast<uintptr_t>(ram_dst))
+		{
+			it->ready = true;
+			break;
+		}
 	}
 
 	if (is_fighter_figatree)
@@ -853,6 +1146,10 @@ extern "C" void portRelocLoadFileFromBytes(
 		portStageAuditEmitLoadSummary(file_id, table_path, copySize);
 		portStageAuditEmitOpcodeCensus(file_id, table_path, ram_dst, copySize);
 	}
+
+	port_log("SSB64: RESOURCE_LOAD name=%s size=%u address=%p reloc_count=%u status=READY deps=%u\n",
+	         table_path ? table_path : "(mod)", (unsigned)copySize, ram_dst,
+	         (unsigned)(intern_steps + extern_steps), extern_count);
 }
 
 /**
@@ -897,9 +1194,9 @@ extern "C" void portRelocLoadFileFromBytesPrivate(
 	// thinks "already done" and skips the BE-restore + TMEM swizzle, leaving
 	// the texel data in the wrong byte order for the RDP.
 	portEvictStructFixupsInRange(ram_dst, copySize);
-	extern void portTextureCacheDeleteRange(const void *base, size_t size);
+	extern "C" void portTextureCacheDeleteRange(const void *base, size_t size);
 	portTextureCacheDeleteRange(ram_dst, copySize);
-	extern void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
+	extern "C" void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
 	portPackedDisplayListCacheDeleteRange(ram_dst, copySize);
 
 	memcpy(ram_dst, src_bytes, copySize);
@@ -924,7 +1221,7 @@ extern "C" void portRelocLoadFileFromBytesPrivate(
 	portRelocEvictFileRangesInRange(ram_dst, copySize);
 	sPortRelocFileRanges.push_back({ reinterpret_cast<uintptr_t>(ram_dst),
 	                                 copySize, /* file_id = */ 0xFFFFFFFFu,
-	                                 "(mod-private)" });
+	                                 "(mod-private)", nLBFileLocationDefault, true });
 
 	/* Mirror into the DL-range registry as the public path does, so
 	 * gfx_step's runaway-walker bounds check accepts mod-private DLs
@@ -1074,7 +1371,8 @@ void* lbRelocGetExternBufferFile(u32 id)
 	sLBRelocExternFileHeap = (void *)((uintptr_t)file_alloc + file_size);
 
 	lbRelocLoadAndRelocFile(id, file_alloc, (u32)file_size, nLBFileLocationExtern);
-	return file_alloc;
+	file = lbRelocFindStatusBufferFile(id);
+	return (file == file_alloc) ? file : NULL;
 }
 
 void* lbRelocGetExternHeapFile(u32 id, void *heap)
@@ -1105,7 +1403,8 @@ void* lbRelocGetInternBufferFile(u32 id)
 	sLBRelocInternBuffer.heap_ptr = (void *)((uintptr_t)file_alloc + file_size);
 
 	lbRelocLoadAndRelocFile(id, file_alloc, (u32)file_size, nLBFileLocationDefault);
-	return file_alloc;
+	file = lbRelocFindStatusBufferFile(id);
+	return (file == file_alloc) ? file : NULL;
 }
 
 void* lbRelocGetForceExternBufferFile(u32 id)
@@ -1121,24 +1420,22 @@ void* lbRelocGetForceExternBufferFile(u32 id)
 	sLBRelocExternFileHeap = (void *)((uintptr_t)file_alloc + file_size);
 
 	lbRelocLoadAndRelocFile(id, file_alloc, (u32)file_size, nLBFileLocationForce);
-	return file_alloc;
+	file = lbRelocFindForceStatusBufferFile(id);
+	return (file == file_alloc) ? file : NULL;
 }
 
 void* lbRelocGetForceExternHeapFile(u32 id, void *heap)
 {
-	/* NOTE: rewinding abandons prior loads above `heap`, and their corpse
-	 * entries linger in the address-keyed registries until a same-range
-	 * load evicts them (a smaller reload leaves the old tail's entries).
-	 * Do NOT try to evict [heap, sLBRelocExternFileHeap) here:
-	 * sLBRelocExternFileHeap is shared with the extern-heap bump path, so
-	 * that span can contain LIVE extern files — evicting it invalidates
-	 * their tokens and crashes scene 28 (verified regression). Corpse
-	 * chain-slot entries are instead detected at use: the runtime texture
-	 * fixup validates a candidate slot's word via
-	 * portRelocTryResolvePointer before clamping. */
+	/* The extern cursor is shared, so [heap, old_cursor) is not a safe
+	 * ownership boundary. Evict only the prior batch recorded for this exact
+	 * force heap and only ranges whose recorded location is Force. */
+	uintptr_t heap_base = reinterpret_cast<uintptr_t>(heap);
+	portRelocEvictForceBatch(heap_base);
 	sLBRelocExternFileHeap = heap;
 	sLBRelocInternBuffer.force_status_buffer_num = 0;
-	return lbRelocGetForceExternBufferFile(id);
+	void *file = lbRelocGetForceExternBufferFile(id);
+	portRelocRecordForceBatch(heap_base, reinterpret_cast<uintptr_t>(sLBRelocExternFileHeap));
+	return file;
 }
 
 /* Mod helper: same force-status-buffer reset that
@@ -1185,12 +1482,49 @@ size_t lbRelocLoadFilesExtern(u32 *ids, u32 len, void **files, void *heap)
 {
 	sLBRelocExternFileHeap = heap;
 
+	u32 failed_ids[8];
+	u32 failed_num = 0;
+	size_t failed_total = 0;
+
 	while (len != 0)
 	{
 		*files = lbRelocGetExternBufferFile(*ids);
+		if (*files == NULL)
+		{
+			/* Silent-NULL propagation is the root of the "stage models
+			 * incomplete / HUD not initialized" class: consumers compute
+			 * near-null pointers from a NULL base via file+offset. Make
+			 * the failing ids visible (throttled to the first 8 per
+			 * burst so a stale archive can't flood the log). */
+			if (failed_num < ARRAY_COUNT(failed_ids))
+			{
+				failed_ids[failed_num++] = *ids;
+			}
+			failed_total++;
+		}
 		ids++;
 		files++;
 		len--;
+	}
+
+	if (failed_total != 0)
+	{
+		static uint32_t s_extern_null_slot_bursts = 0;
+		if ((s_extern_null_slot_bursts & 0x3F) == 0)
+		{
+			port_log("SSB64: RESOURCE_LOAD status=NULL_SLOTS burst=%u total_failed=%u"
+			         " ids=%u,%u,%u,%u,%u,%u,%u,%u\n",
+			         s_extern_null_slot_bursts, failed_total,
+			         (unsigned)(failed_num > 0 ? failed_ids[0] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 1 ? failed_ids[1] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 2 ? failed_ids[2] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 3 ? failed_ids[3] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 4 ? failed_ids[4] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 5 ? failed_ids[5] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 6 ? failed_ids[6] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 7 ? failed_ids[7] : 0xFFFFFFFFu));
+		}
+		s_extern_null_slot_bursts++;
 	}
 
 	return (size_t)((uintptr_t)sLBRelocExternFileHeap - (uintptr_t)heap);
@@ -1200,12 +1534,44 @@ size_t lbRelocLoadFilesIntern(u32 *ids, u32 len, void **files)
 {
 	void *heap = sLBRelocInternBuffer.heap_ptr;
 
+	u32 failed_ids[8];
+	u32 failed_num = 0;
+	size_t failed_total = 0;
+
 	while (len)
 	{
 		*files = lbRelocGetInternBufferFile(*ids);
+		if (*files == NULL)
+		{
+			if (failed_num < ARRAY_COUNT(failed_ids))
+			{
+				failed_ids[failed_num++] = *ids;
+			}
+			failed_total++;
+		}
 		ids++;
 		files++;
 		len--;
+	}
+
+	if (failed_total != 0)
+	{
+		static uint32_t s_intern_null_slot_bursts = 0;
+		if ((s_intern_null_slot_bursts & 0x3F) == 0)
+		{
+			port_log("SSB64: RESOURCE_LOAD status=INTERN_NULL_SLOTS burst=%u total_failed=%u"
+			         " ids=%u,%u,%u,%u,%u,%u,%u,%u\n",
+			         s_intern_null_slot_bursts, failed_total,
+			         (unsigned)(failed_num > 0 ? failed_ids[0] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 1 ? failed_ids[1] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 2 ? failed_ids[2] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 3 ? failed_ids[3] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 4 ? failed_ids[4] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 5 ? failed_ids[5] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 6 ? failed_ids[6] : 0xFFFFFFFFu),
+			         (unsigned)(failed_num > 7 ? failed_ids[7] : 0xFFFFFFFFu));
+		}
+		s_intern_null_slot_bursts++;
 	}
 
 	return (size_t)((uintptr_t)sLBRelocInternBuffer.heap_ptr - (uintptr_t)heap);
@@ -1402,6 +1768,7 @@ void lbRelocInitSetup(LBRelocSetup *setup)
 	gmColScriptsLinkRelocTargets();
 	portResetPackedDisplayListCache();
 	sPortRelocFileRanges.clear();
+	sPortRelocForceBatches.clear();
 
 	// Clear u16 struct fixup tracking — addresses from the old heap are stale
 	portResetStructFixups();
