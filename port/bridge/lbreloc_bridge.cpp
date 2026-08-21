@@ -31,6 +31,13 @@
 #include "bridge/lbreloc_byteswap.h"
 
 extern "C" void port_aobj_register_halfswapped_range(void *base, unsigned long size);
+// Forward-declared here (rather than at each call site) because this
+// toolchain's arm-vita-eabi-g++ (15.2.0) rejects block-scope `extern "C"`
+// declarations ("expected unqualified-id before string constant") even
+// though they're valid standard C++ - a stricter-than-usual GCC build.
+extern "C" void portTextureCacheDeleteRange(const void *base, size_t size);
+extern "C" void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
+extern "C" void portEvictStructFixupsInRange(const void *base, size_t size);
 
 // Bridge-local type definitions.
 // These MUST be ABI-compatible with the decomp definitions in lbtypes.h.
@@ -309,9 +316,6 @@ static void portRelocEvictForceBatch(uintptr_t heap_base)
 
 	const uintptr_t batch_begin = batch_it->heap_base;
 	const uintptr_t batch_end = batch_it->heap_end;
-	extern "C" void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
-	extern "C" void portTextureCacheDeleteRange(const void *base, size_t size);
-	extern "C" void portEvictStructFixupsInRange(const void *base, size_t size);
 
 	for (const auto &range : sPortRelocFileRanges)
 	{
@@ -368,9 +372,6 @@ static void portRelocRecordForceBatch(uintptr_t heap_base, uintptr_t heap_end)
 extern "C" void port_taskman_evict_arena_caches(const void *base, size_t size)
 {
 	if ((base == nullptr) || (size == 0)) return;
-	extern "C" void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
-	extern "C" void portTextureCacheDeleteRange(const void *base, size_t size);
-	extern "C" void portEvictStructFixupsInRange(const void *base, size_t size);
 	portPackedDisplayListCacheDeleteRange(base, size);
 	portTextureCacheDeleteRange(base, size);
 	portEvictStructFixupsInRange(base, size);
@@ -778,14 +779,12 @@ extern "C" void portRelocLoadFileFromBytes(
 	// reused heap address would otherwise hit a stale cached upload from
 	// the prior file. Symptom: scene 45 (DK+Samus Kongo Jungle) renders
 	// the prior scene's wallpaper. See docs/dk_intro_wallpaper_*.md
-	extern "C" void portTextureCacheDeleteRange(const void *base, size_t size);
 	portTextureCacheDeleteRange(ram_dst, copySize);
 	// Evict cached packed-DL widenings whose source pointer falls in the
 	// range we're about to overwrite. Without this, the widening cache
 	// hands back a vector with stale fileBase/fileSize, segment-0E sub-DL
 	// references resolve to the prior file's address window, and the
 	// interpreter walks garbage — fingerprint of issue #103/#128.
-	extern "C" void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
 	portPackedDisplayListCacheDeleteRange(ram_dst, copySize);
 	portRelocEvictFileRangesInRange(ram_dst, copySize);
 	port_log("SSB64: RELOC_MEMCPY_GUARD file_id=%u dst=%p src=%p size=%u allocation_size=%u\n",
@@ -1194,9 +1193,7 @@ extern "C" void portRelocLoadFileFromBytesPrivate(
 	// thinks "already done" and skips the BE-restore + TMEM swizzle, leaving
 	// the texel data in the wrong byte order for the RDP.
 	portEvictStructFixupsInRange(ram_dst, copySize);
-	extern "C" void portTextureCacheDeleteRange(const void *base, size_t size);
 	portTextureCacheDeleteRange(ram_dst, copySize);
-	extern "C" void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
 	portPackedDisplayListCacheDeleteRange(ram_dst, copySize);
 
 	memcpy(ram_dst, src_bytes, copySize);
