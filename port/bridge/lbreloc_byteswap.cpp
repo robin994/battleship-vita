@@ -603,6 +603,12 @@ static void tex_dump_chain(int file_id, uint32_t file_off,
 // other's work. Cleared at scene change via portResetStructFixups.
 static std::unordered_set<uintptr_t> sStructU16Fixups;
 
+// Vertex fixups must not share idempotency state with Sprite/MObjSub/DObjDesc
+// struct fixups.  A reused address can legitimately be interpreted as a
+// different data type later in the scene; sharing one set lets an unrelated
+// struct fixup suppress the first real G_VTX normalization at that address.
+static std::unordered_set<uintptr_t> sVertexFixups;
+
 // Tracks runtime texture bases that own at least one fixed word, plus the
 // largest request size seen from that base. This preserves the old pass2/chain
 // skip behavior for exact-base matches while sTexFixupRanges handles the actual
@@ -942,6 +948,53 @@ static void scan_display_lists(const uint32_t *words, size_t num_words,
 	}
 }
 
+
+// Vita-safe pre-fix pass: only recognize structurally valid F3DEX2 G_VTX
+// commands.  Unlike the legacy pass2 this does not infer SETTIMG/LOADBLOCK or
+// TLUT regions from arbitrary blob bytes, so palette/texture data cannot be
+// mutated merely because it happens to resemble a GBI command pair.
+static void scan_vertex_lists_strict(const uint32_t *words, size_t num_words,
+                                     size_t file_size, std::vector<FixupRegion> &regions)
+{
+	const uint8_t *bytes = reinterpret_cast<const uint8_t *>(words);
+	for (size_t i = 0; i + 1 < num_words; i += 2)
+	{
+		uint32_t w0 = words[i];
+		uint32_t w1 = words[i + 1];
+		if (((w0 >> 24) & 0xFFu) != GBI_VTX) continue;
+
+		// F3DEX2 G_VTX structural validation, matching chain_fixup_vertex().
+		if ((w0 & 0x00F00000u) != 0) continue; // reserved bits [23:20]
+		if ((w0 & 0x1u) != 0) continue;        // encoded end index is even
+		uint32_t num_vtx = (w0 >> 12) & 0xFFu;
+		uint32_t end_idx = (w0 & 0xFFEu) >> 1;
+		if (num_vtx == 0 || num_vtx > 32) continue;
+		if (end_idx > 32 || end_idx < num_vtx) continue;
+
+		uint8_t seg = (uint8_t)(w1 >> 24);
+		uint32_t offset = w1 & 0x00FFFFFFu;
+		if (seg != FILE_SEGMENT_ID) continue;
+		size_t total_bytes = (size_t)num_vtx * 16u;
+		if ((size_t)offset > file_size || total_bytes > file_size - (size_t)offset) continue;
+		if ((offset & 0x3u) != 0) continue;
+
+		// Content sanity check on the first vertex in post-pass1 form.
+		// This rejects the overwhelmingly common false-positive 0x01 words in
+		// animation/struct data before any in-place mutation happens.
+		const uint32_t *region = reinterpret_cast<const uint32_t *>(bytes + offset);
+		int16_t ob0 = (int16_t)((region[0] >> 16) & 0xFFFFu);
+		int16_t ob1 = (int16_t)(region[0] & 0xFFFFu);
+		int16_t ob2 = (int16_t)((region[1] >> 16) & 0xFFFFu);
+		uint16_t flag = (uint16_t)(region[1] & 0xFFFFu);
+		const int kMaxCoord = 16384;
+		if (ob0 < -kMaxCoord || ob0 > kMaxCoord ||
+		    ob1 < -kMaxCoord || ob1 > kMaxCoord ||
+		    ob2 < -kMaxCoord || ob2 > kMaxCoord || flag != 0) continue;
+
+		regions.push_back({offset, num_vtx * 16u, FIXUP_VERTEX});
+	}
+}
+
 // ============================================================
 //  Fixup application
 // ============================================================
@@ -1028,15 +1081,18 @@ static void apply_fixups(void *data, size_t file_size,
 		switch (region.type)
 		{
 		case FIXUP_VERTEX:
-			apply_fixup_vertex(region_words, num_words);
-			// Per-vertex registration so the runtime lazy fixup
-			// (portRelocFixupVertexAtRuntime) skips each Vtx
-			// individually — handles overlapping sub-loads.
+			// Strict per-Vtx idempotency BEFORE mutation.  The same Vtx array can
+			// be referenced by many G_VTX commands (including overlapping subranges);
+			// the legacy pass2 applied the whole region first and only registered it
+			// afterwards, so a duplicate region could rotate/bswap the vertex twice.
 			{
 				uintptr_t base = reinterpret_cast<uintptr_t>(region_words);
-				size_t n_vtx = num_words / 4;  // 4 u32 words per Vtx
+				size_t n_vtx = num_words / 4;
 				for (size_t v = 0; v < n_vtx; v++) {
-					sStructU16Fixups.insert(base + v * 16);
+					uintptr_t key = base + v * 16;
+					if (sVertexFixups.count(key)) continue;
+					sVertexFixups.insert(key);
+					apply_fixup_vertex(region_words + v * 4, 4);
 				}
 			}
 			break;
@@ -1086,26 +1142,29 @@ extern "C" void portRelocByteSwapBlob(void *data, size_t size, unsigned int file
 
 #if defined(__vita__)
 	/*
-	 * Vita must not infer display-list commands by scanning every 8-byte pair
-	 * in the reloc blob.  Palette, texel, animation and struct bytes can
-	 * coincidentally have a GBI-looking opcode and the old pass2 would then
-	 * mutate an unrelated vertex/texture range in place before the model was
-	 * ever constructed.
-	 *
-	 * Keep the deterministic pass1 u32 conversion here.  Vertex and texture
-	 * lane-order fixups are already performed lazily at the real Fast3D
-	 * G_VTX / LOADBLOCK / LOADTILE / LOADTLUT execution sites, while the
-	 * relocation-chain fixups remain available for genuine pointer slots.
+	 * Vita: pre-normalize only vertex arrays referenced by structurally valid
+	 * F3DEX2 G_VTX commands.  Texture/TLUT fixups remain lazy at the actual
+	 * renderer execution sites; we deliberately do not restore the old broad
+	 * pass2 scan that could mutate arbitrary palette/struct bytes.
 	 */
-	static bool sLazyFixupModeLogged = false;
-	if (!sLazyFixupModeLogged)
+	size_t num_words = size / 4;
+	const uint32_t *words = static_cast<const uint32_t *>(data);
+	std::vector<FixupRegion> vertex_regions;
+	scan_vertex_lists_strict(words, num_words, size, vertex_regions);
+	if (!vertex_regions.empty())
 	{
-		port_log("SSB64: RELOC_FIXUP_MODE vita pass2_scan=disabled lazy_vtx_tex=enabled\n");
-		sLazyFixupModeLogged = true;
+		apply_fixups(data, size, vertex_regions, file_id);
 	}
-	if (file_id == 52 || file_id == 108 || file_id == 296 || file_id == 313)
+	static bool sVitaVertexPrefixModeLogged = false;
+	if (!sVitaVertexPrefixModeLogged)
 	{
-		port_log("SSB64: RELOC_FIXUP_LOAD file=%u pass1=done pass2_scan=skipped\n", file_id);
+		port_log("SSB64: RELOC_FIXUP_MODE vita pass2=vertex-strict texture=lazy\n");
+		sVitaVertexPrefixModeLogged = true;
+	}
+	if (file_id == 52 || file_id == 108 || file_id == 296 || file_id == 313 || file_id == 317)
+	{
+		port_log("SSB64: RELOC_VTX_PREFIX file=%u regions=%u\n",
+		         file_id, (unsigned int)vertex_regions.size());
 	}
 #else
 	// Pass 2: legacy DL-guided fixup scan.  This is intentionally disabled
@@ -1164,6 +1223,7 @@ extern "C" void portFixupStructU32(void *base, unsigned int byte_offset, unsigne
 extern "C" void portResetStructFixups(void)
 {
 	sStructU16Fixups.clear();
+	sVertexFixups.clear();
 	sTexFixupExtent.clear();
 	sTexFixupRanges.clear();
 	sProtectedStructRanges.clear();
@@ -1186,6 +1246,7 @@ extern "C" void portEvictStructFixupsInRange(const void *begin, size_t size)
 		}
 	};
 	evict_set(sStructU16Fixups);
+	evict_set(sVertexFixups);
 	evict_set(sDeswizzle4cFixups);
 	tex_fixup_ranges_evict(lo, hi);
 	for (auto it = sChainSlotAddrs.lower_bound(lo);
@@ -1466,8 +1527,8 @@ static int chain_fixup_vertex(void *file_base, size_t file_size,
 	for (uint32_t i = 0; i < num_vtx; i++)
 	{
 		uintptr_t vtx_key = target_addr + (uintptr_t)i * 16;
-		if (sStructU16Fixups.count(vtx_key)) continue;
-		sStructU16Fixups.insert(vtx_key);
+		if (sVertexFixups.count(vtx_key)) continue;
+		sVertexFixups.insert(vtx_key);
 
 		region[i * 4 + 0] = (region[i * 4 + 0] << 16) | (region[i * 4 + 0] >> 16);
 		region[i * 4 + 1] = (region[i * 4 + 1] << 16) | (region[i * 4 + 1] >> 16);
@@ -1894,8 +1955,8 @@ extern "C" void portRelocFixupVertexAtRuntime(const void *addr, unsigned int num
 	for (unsigned int i = 0; i < num_vtx; i++)
 	{
 		uintptr_t vtx_key = target + (uintptr_t)i * 16;
-		if (sStructU16Fixups.count(vtx_key)) { skipped_here++; continue; }
-		sStructU16Fixups.insert(vtx_key);
+		if (sVertexFixups.count(vtx_key)) { skipped_here++; continue; }
+		sVertexFixups.insert(vtx_key);
 		fixed_here++;
 
 		// word 0: s16 ob[0] | s16 ob[1] → rotate16
