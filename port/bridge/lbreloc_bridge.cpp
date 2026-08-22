@@ -1284,6 +1284,16 @@ extern "C" void portRelocLoadFileFromBytes(
 		}
 	}
 
+#ifdef __vita__
+	// Root 3D normalization at a deterministic point: after every relocation
+	// token is live, before any game-side consumer can observe RESOURCE_READY.
+	// The manifest follows only validated packed display lists and normalizes
+	// their proven G_VTX targets. The reloc chain itself never mutates Vtx.
+	portRelocFinalize3DVertexManifest(ram_dst, copySize, file_id,
+	                                  reloc_slot_offsets.empty() ? nullptr : reloc_slot_offsets.data(),
+	                                  reloc_slot_offsets.size());
+#endif
+
 	if (is_fighter_figatree)
 	{
 		portRelocFixupFighterFigatree(ram_dst, copySize, figatree_reloc_words);

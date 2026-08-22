@@ -218,6 +218,19 @@ int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
                                    unsigned int slot_byte_off,
                                    unsigned int target_byte_off);
 
+
+/**
+ * Finalize reloc-backed 3D vertex payloads after intern+extern relocation.
+ *
+ * Candidate display-list roots come from live relocation slots. Valid packed
+ * GBI lists are followed recursively and only their proven G_VTX targets are
+ * normalized in-place. Vita uses this before publishing RESOURCE_LOAD READY.
+ */
+void portRelocFinalize3DVertexManifest(void *file_base, size_t file_size,
+                                      unsigned int file_id,
+                                      const unsigned int *reloc_slot_offsets,
+                                      size_t reloc_slot_count);
+
 /**
  * Lazy vertex fixup at interpreter execute time (Option A).
  *

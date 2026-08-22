@@ -1152,7 +1152,7 @@ extern "C" void portRelocByteSwapBlob(void *data, size_t size, unsigned int file
 	static bool sVitaLazyOnlyModeLogged = false;
 	if (!sVitaLazyOnlyModeLogged)
 	{
-		port_log("SSB64: RELOC_FIXUP_MODE vita vertex=typed-hybrid chain-vtx=resource-class texture=lazy\n");
+		port_log("SSB64: RELOC_FIXUP_MODE vita vertex=post-reloc-manifest chain-vtx=disabled texture=lazy\n");
 		sVitaLazyOnlyModeLogged = true;
 	}
 #else
@@ -1677,34 +1677,18 @@ extern "C" int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
 		if ((slot_byte_off & 0x7) != 4) return 0;
 
 #if defined(__vita__)
-		// Never mutate mixed fighter-model blobs from chain heuristics. Only
-		// resource classes with a demonstrated pre-Fast3D Vtx consumer may use
-		// the early path; everything else stays typed/lazy.
-		const bool early_class = chain_vtx_resource_allows_early_fix(file_base);
-		const bool safe_context = early_class &&
-		                          chain_vtx_has_dl_context(file_bytes, file_size, slot_byte_off);
+		// Never mutate Vtx payloads from a reloc-chain predecessor heuristic.
+		// The chain only establishes pointer provenance. After both relocation
+		// walks finish, portRelocFinalize3DVertexManifest() follows live tokens
+		// into validated packed display lists and normalizes only real G_VTX
+		// targets before the resource is published.
 		int file_id = portRelocFindFileIdAndBase(file_base, nullptr);
 		uint32_t num_vtx = (w0 >> 12) & 0xFFu;
-		if (safe_context)
-		{
-			const int fixed = chain_fixup_vertex(file_base, file_size, slot_byte_off,
-			                                     target_byte_off, w0);
-			static unsigned int sSafeVertexTrace = 0;
-			if (sSafeVertexTrace < 128u)
-			{
-				port_log("SSB64: RELOC_VTX_CHAIN_SAFE_APPLY file=%d slot=0x%x target=0x%x n=%u result=%d policy=resource-class\n",
-				         file_id, slot_byte_off, target_byte_off, num_vtx, fixed);
-				++sSafeVertexTrace;
-			}
-			return fixed;
-		}
-
 		static unsigned int sDeferredVertexTrace = 0;
-		if (sDeferredVertexTrace < 128u)
+		if (sDeferredVertexTrace < 64u)
 		{
-			port_log("SSB64: RELOC_VTX_CHAIN_DEFER file=%d slot=0x%x target=0x%x n=%u reason=%s\n",
-			         file_id, slot_byte_off, target_byte_off, num_vtx,
-			         early_class ? "weak-dl-context" : "typed-resource-class");
+			port_log("SSB64: RELOC_VTX_CHAIN_DEFER file=%d slot=0x%x target=0x%x n=%u reason=post-reloc-manifest\n",
+			         file_id, slot_byte_off, target_byte_off, num_vtx);
 			++sDeferredVertexTrace;
 		}
 		return 0;
@@ -1714,6 +1698,302 @@ extern "C" int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
 	}
 	return 0;
 }
+
+
+// ============================================================
+//  Post-relocation 3D vertex manifest (Vita)
+// ============================================================
+//
+// Vtx payloads are not type-safe under the blanket u32 endian pass. The old
+// Vita chain fix guessed their type from the word before a relocation slot,
+// making normalization dependent on chain order and nearby token values.
+//
+// This pass runs after intern+extern relocation has completed. Candidate DL
+// roots come only from live relocation tokens. A root is accepted only when it
+// parses as a bounded packed GBI list with valid opcodes and a real terminator.
+// G_DL edges are followed recursively. Only G_VTX targets reached through that
+// validated graph are normalized in-place. This is early enough for game code
+// that copies vertices later, while runtime-built lists still fall back to the
+// non-destructive GfxSpVertex decode path.
+
+#if defined(__vita__)
+
+struct ManifestVtxRange
+{
+	uintptr_t address;
+	size_t bytes;
+};
+
+static bool manifest_opcode_plausible(uint8_t op)
+{
+	if (op <= 0x0Fu) return true;
+	if (op >= 0xD3u) return true;
+	if (op == 0xC0u) return true;
+	return false;
+}
+
+static bool manifest_decode_vtx_command(uint32_t w0, unsigned int *out_num_vtx)
+{
+	if (((w0 >> 24) & 0xFFu) != GBI_VTX) return false;
+	if ((w0 & 0x00F00000u) != 0) return false;
+	if ((w0 & 0x1u) != 0) return false;
+
+	const uint32_t num_vtx = (w0 >> 12) & 0xFFu;
+	const uint32_t end_idx = (w0 & 0xFFEu) >> 1;
+	if (num_vtx == 0 || num_vtx > 32u) return false;
+	if (end_idx > 32u || end_idx < num_vtx) return false;
+
+	if (out_num_vtx != nullptr) *out_num_vtx = num_vtx;
+	return true;
+}
+
+static bool manifest_resolve_resource_pointer(uint32_t raw,
+                                              uintptr_t owner_base,
+                                              size_t owner_size,
+                                              void **out_ptr)
+{
+	extern void *portRelocTryResolvePointer(uint32_t token);
+
+	void *resolved = raw != 0 ? portRelocTryResolvePointer(raw) : nullptr;
+
+	if (resolved == nullptr)
+	{
+		const uint8_t seg = (uint8_t)(raw >> 24);
+		const uint32_t off = raw & 0x00FFFFFFu;
+		if (seg == FILE_SEGMENT_ID && (size_t)off < owner_size)
+		{
+			resolved = reinterpret_cast<void *>(owner_base + (uintptr_t)off);
+		}
+	}
+
+	if (resolved == nullptr) return false;
+
+	uintptr_t target_base = 0;
+	size_t target_size = 0;
+	if (!portRelocFindContainingFile(resolved, &target_base, &target_size))
+		return false;
+
+	if (out_ptr != nullptr) *out_ptr = resolved;
+	return true;
+}
+
+static bool manifest_validate_vtx_range(void *ptr, unsigned int num_vtx,
+                                        ManifestVtxRange *out_range)
+{
+	if (ptr == nullptr || num_vtx == 0 || num_vtx > 32u) return false;
+
+	uintptr_t base = 0;
+	size_t size = 0;
+	if (!portRelocFindContainingFile(ptr, &base, &size)) return false;
+
+	const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+	const size_t off = (size_t)(addr - base);
+	const size_t bytes = (size_t)num_vtx * 16u;
+
+	if ((addr & 0x3u) != 0) return false;
+	if (off > size || bytes > size - off) return false;
+
+	if (out_range != nullptr)
+	{
+		out_range->address = addr;
+		out_range->bytes = bytes;
+	}
+	return true;
+}
+
+struct ManifestDlResult
+{
+	bool valid = false;
+	std::vector<ManifestVtxRange> vtx_ranges;
+	std::vector<void *> sublists;
+};
+
+static ManifestDlResult manifest_parse_packed_dl(void *candidate)
+{
+	ManifestDlResult result;
+	if (candidate == nullptr) return result;
+
+	uintptr_t file_base = 0;
+	size_t file_size = 0;
+	if (!portRelocFindContainingFile(candidate, &file_base, &file_size))
+		return result;
+
+	const uintptr_t start = reinterpret_cast<uintptr_t>(candidate);
+	if (start < file_base) return result;
+
+	const size_t start_off = (size_t)(start - file_base);
+	if ((start_off & 0x7u) != 0 || start_off + 8u > file_size)
+		return result;
+
+	const size_t max_commands = std::min<size_t>((file_size - start_off) / 8u, 512u);
+	unsigned int meaningful = 0;
+	bool terminated = false;
+	bool saw_graphics = false;
+
+	for (size_t i = 0; i < max_commands; ++i)
+	{
+		const uint32_t *cmd = reinterpret_cast<const uint32_t *>(start + i * 8u);
+		const uint32_t w0 = cmd[0];
+		const uint32_t w1 = cmd[1];
+		const uint8_t op = (uint8_t)(w0 >> 24);
+
+		if (!manifest_opcode_plausible(op))
+			return ManifestDlResult{};
+
+		if (w0 != 0 || w1 != 0) ++meaningful;
+
+		if (op == GBI_VTX)
+		{
+			unsigned int num_vtx = 0;
+			if (!manifest_decode_vtx_command(w0, &num_vtx))
+				return ManifestDlResult{};
+
+			void *vtx_ptr = nullptr;
+			if (manifest_resolve_resource_pointer(w1, file_base, file_size, &vtx_ptr))
+			{
+				ManifestVtxRange range{};
+				if (!manifest_validate_vtx_range(vtx_ptr, num_vtx, &range))
+					return ManifestDlResult{};
+				result.vtx_ranges.push_back(range);
+				saw_graphics = true;
+			}
+		}
+		else if (op == 0x05u || op == 0x06u || op == 0x07u)
+		{
+			saw_graphics = true;
+		}
+		else if (op == GBI_DL)
+		{
+			saw_graphics = true;
+			void *sub = nullptr;
+			if (manifest_resolve_resource_pointer(w1, file_base, file_size, &sub))
+				result.sublists.push_back(sub);
+
+			const bool no_push = ((w0 >> 16) & 1u) != 0;
+			if (no_push)
+			{
+				terminated = true;
+				break;
+			}
+		}
+		else if (op == GBI_ENDDL)
+		{
+			terminated = true;
+			break;
+		}
+	}
+
+	result.valid = terminated && meaningful >= 2u && saw_graphics;
+	if (!result.valid)
+	{
+		result.vtx_ranges.clear();
+		result.sublists.clear();
+	}
+	return result;
+}
+
+extern "C" void portRelocFinalize3DVertexManifest(void *file_base, size_t file_size,
+                                                   unsigned int file_id,
+                                                   const unsigned int *reloc_slot_offsets,
+                                                   size_t reloc_slot_count)
+{
+	if (file_base == nullptr || file_size < 8u ||
+	    reloc_slot_offsets == nullptr || reloc_slot_count == 0)
+		return;
+
+	const uintptr_t base = reinterpret_cast<uintptr_t>(file_base);
+	std::vector<void *> queue;
+	queue.reserve(reloc_slot_count + 16u);
+
+	extern void *portRelocTryResolvePointer(uint32_t token);
+	for (size_t i = 0; i < reloc_slot_count; ++i)
+	{
+		const size_t slot_off = (size_t)reloc_slot_offsets[i];
+		if (slot_off > file_size || sizeof(uint32_t) > file_size - slot_off)
+			continue;
+
+		const uint32_t token = *reinterpret_cast<const uint32_t *>(base + slot_off);
+		void *target = token != 0 ? portRelocTryResolvePointer(token) : nullptr;
+		if (target != nullptr) queue.push_back(target);
+	}
+
+	std::unordered_set<uintptr_t> visited_dl;
+	std::map<uintptr_t, size_t> ranges;
+	unsigned int valid_dls = 0;
+	unsigned int rejected_roots = 0;
+
+	for (size_t q = 0; q < queue.size() && q < 4096u; ++q)
+	{
+		void *candidate = queue[q];
+		const uintptr_t key = reinterpret_cast<uintptr_t>(candidate);
+		if (!visited_dl.insert(key).second) continue;
+
+		ManifestDlResult parsed = manifest_parse_packed_dl(candidate);
+		if (!parsed.valid)
+		{
+			++rejected_roots;
+			continue;
+		}
+
+		++valid_dls;
+		for (const ManifestVtxRange &r : parsed.vtx_ranges)
+		{
+			auto it = ranges.find(r.address);
+			if (it == ranges.end() || it->second < r.bytes)
+				ranges[r.address] = r.bytes;
+		}
+		for (void *sub : parsed.sublists)
+			if (sub != nullptr) queue.push_back(sub);
+	}
+
+	unsigned int normalized_ranges = 0;
+	unsigned int normalized_vertices = 0;
+	unsigned int already_normalized = 0;
+
+	for (const auto &entry : ranges)
+	{
+		const uintptr_t addr = entry.first;
+		const size_t bytes = entry.second;
+		if ((bytes % 16u) != 0) continue;
+
+		uint32_t *region = reinterpret_cast<uint32_t *>(addr);
+		const size_t count = bytes / 16u;
+		for (size_t i = 0; i < count; ++i)
+		{
+			const uintptr_t vtx_key = addr + i * 16u;
+			if (sVertexFixups.count(vtx_key) != 0)
+			{
+				++already_normalized;
+				continue;
+			}
+
+			sVertexFixups.insert(vtx_key);
+			region[i * 4u + 0u] = rotate16(region[i * 4u + 0u]);
+			region[i * 4u + 1u] = rotate16(region[i * 4u + 1u]);
+			region[i * 4u + 2u] = rotate16(region[i * 4u + 2u]);
+			region[i * 4u + 3u] = BSWAP32(region[i * 4u + 3u]);
+			++normalized_vertices;
+		}
+		++normalized_ranges;
+	}
+
+	if (valid_dls > 0u || normalized_vertices > 0u)
+	{
+		port_log("SSB64: RESOURCE_3D_MANIFEST file_id=%u roots=%u valid_dls=%u rejected=%u "
+		         "vtx_ranges=%u normalized_vertices=%u prehost_vertices=%u\n",
+		         file_id, (unsigned int)reloc_slot_count, valid_dls, rejected_roots,
+		         normalized_ranges, normalized_vertices, already_normalized);
+	}
+}
+
+#else
+
+extern "C" void portRelocFinalize3DVertexManifest(void *, size_t, unsigned int,
+                                                   const unsigned int *, size_t)
+{
+}
+
+#endif
 
 // ============================================================
 //  Lazy runtime fixup (Option A)
