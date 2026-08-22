@@ -379,7 +379,30 @@ def rgba16_to_rgba8888(raw: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def ia4_to_rgba8888(raw: bytes, width: int, height: int) -> bytes:
+def unswizzle_ia4_strip(raw: bytes, width_img: int, height: int) -> bytes:
+    """Undo the N64 sprite-library TMEM odd-row swizzle for IA4 data.
+
+    The runtime Vita path performs the same transform in
+    portFixupSpriteBitmapData(): 4b/8b/16b sprite LOAD_BLOCK data swaps the
+    two 4-byte halves of each 8-byte group on odd rows.  ROM bytes are already
+    in big-endian texel order, so unlike the runtime bridge we do *not* BSWAP32
+    here; we only undo the pre-swizzle before linear pixel decoding.
+    """
+    row_bytes = (width_img + 1) // 2
+    out = bytearray(raw)
+    if row_bytes < 8:
+        return bytes(out)
+    for row in range(1, height, 2):
+        base = row * row_bytes
+        for g in range(0, row_bytes - 7, 8):
+            a = out[base + g:base + g + 4]
+            b = out[base + g + 4:base + g + 8]
+            out[base + g:base + g + 4] = b
+            out[base + g + 4:base + g + 8] = a
+    return bytes(out)
+
+
+def ia4_to_rgba8888(raw: bytes, width: int, height: int, width_img: int | None = None) -> bytes:
     """
     Convert an N64 IA4 buffer to 8-bit RGBA.
 
@@ -398,11 +421,11 @@ def ia4_to_rgba8888(raw: bytes, width: int, height: int) -> bytes:
     Returns:
         bytes of length width * height * 4 (RGBA8888).
     """
-    # IA4 packs 2 pixels per byte.  Row stride in bytes uses width (already
-    # padded to an even-nibble boundary by the sprite's width_img field which
-    # resolve_bitmap_offsets reads as bm["width"]).  For safety, derive stride
-    # from the actual rendered width (round up to next even number of pixels).
-    row_stride = (width + 1) // 2  # bytes per row (2 pixels per byte)
+    # IA4 packs 2 pixels per byte.  The DMA/source row stride is width_img,
+    # while width is only the authored/rendered width.  They often match, but
+    # using width here corrupts sprites with padded source rows.
+    stride_pixels = width if width_img is None else width_img
+    row_stride = (stride_pixels + 1) // 2
     out = bytearray(width * height * 4)
     for row in range(height):
         for col in range(width):
@@ -440,9 +463,10 @@ def decode_ia4_sprite(file_data: bytes, sprite_off: int) -> Image.Image:
     rows = []
     for bm in resolve_bitmap_offsets(file_data, sp):
         strip_w = bm["width"]
+        strip_w_img = bm["width_img"] if bm["width_img"] > 0 else strip_w
         strip_h = bm["actualHeight"]
         rendered_rows = min(sp["bmheight"], strip_h)
-        row_stride = (strip_w + 1) // 2
+        row_stride = (strip_w_img + 1) // 2
         raw_bytes = row_stride * strip_h
         buf_off = bm["buf_off"]
         if buf_off < 0 or buf_off + raw_bytes > len(file_data):
@@ -450,7 +474,9 @@ def decode_ia4_sprite(file_data: bytes, sprite_off: int) -> Image.Image:
                 f"IA4 sprite 0x{sprite_off:X}: bitmap data 0x{buf_off:X}+0x{raw_bytes:X} "
                 f"outside reloc file (0x{len(file_data):X})"
             )
-        rgba = ia4_to_rgba8888(file_data[buf_off:buf_off + raw_bytes], strip_w, strip_h)
+        raw_strip = file_data[buf_off:buf_off + raw_bytes]
+        raw_strip = unswizzle_ia4_strip(raw_strip, strip_w_img, strip_h)
+        rgba = ia4_to_rgba8888(raw_strip, strip_w, strip_h, strip_w_img)
         row_bytes = strip_w * 4
         for row in range(rendered_rows):
             # Nameplate sprites are full-width strips; crop any DMA padding to
@@ -488,33 +514,325 @@ def _glyph_mask(img: Image.Image, x0: int, x1: int) -> Image.Image:
     return out
 
 
+def _trim_glyph_alpha(img: Image.Image) -> Image.Image:
+    """Trim transparent side columns while preserving the 10px baseline."""
+    bbox = img.getchannel("A").getbbox()
+    if bbox is None:
+        return Image.new("RGBA", (1, img.height), (0, 0, 0, 0))
+    return img.crop((bbox[0], 0, bbox[2], img.height))
+
+
+def _glyph_similarity(a: Image.Image, b: Image.Image) -> float:
+    """Binary-alpha similarity for two ROM glyph samples.
+
+    Repeated letters in MNMaps use the same raster glyph but tight kerning
+    can crop a transparent -- or even inked -- edge column (see CONGO
+    JUNGLE's 'L': its only raw run is just the vertical stroke, the foot
+    entirely lost to neighbouring-glyph contention).  Comparing trimmed
+    masks with a small horizontal shift, as before, handles the common
+    off-by-a-column case; on top of that, also score containment -- does
+    the *entire* smaller glyph's ink sit inside the larger one's ink at some
+    alignment?  This is what lets a later, fuller sample for the same
+    letter be recognised as consistent with (and safely replace, via the
+    widest-sample rule in ``build_rom_nameplate_glyphs``) an earlier
+    truncated one, without resizing either glyph or guessing a shape.  A
+    pure containment match is capped below a pure ink-for-ink match so a
+    pixel-identical pair still wins any comparison.
+    """
+    a = _trim_glyph_alpha(a)
+    b = _trim_glyph_alpha(b)
+    if a.height != b.height:
+        return 0.0
+
+    aset = {
+        (x, y)
+        for y in range(a.height)
+        for x in range(a.width)
+        if a.getchannel("A").getpixel((x, y)) >= 128
+    }
+    bbase = {
+        (x, y)
+        for y in range(b.height)
+        for x in range(b.width)
+        if b.getchannel("A").getpixel((x, y)) >= 128
+    }
+    if not aset or not bbase:
+        return 0.0
+
+    small, large = (aset, bbase) if len(aset) <= len(bbase) else (bbase, aset)
+    iou = 0.0
+    contain = 0.0
+    shift = 2 if abs(a.width - b.width) > 2 else 1
+    for dx in range(-shift, shift + 1):
+        bset = {(x + dx, y) for x, y in bbase}
+        union = aset | bset
+        if union:
+            iou = max(iou, len(aset & bset) / len(union))
+        shifted_small = {(x + dx, y) for x, y in small}
+        contain = max(contain, len(shifted_small & large) / len(shifted_small))
+    # Containment alone is gameable by extreme size mismatches: a
+    # near-empty sliver trivially sits "inside" almost anything, and a huge
+    # blob trivially "contains" almost anything small.  Require the two
+    # glyphs to be within a plausible size ratio of each other -- a
+    # genuinely truncated sample (CONGO JUNGLE's 'L' losing its foot) is
+    # still a large fraction of the real glyph's ink, not a sliver of it.
+    if len(small) < 0.4 * len(large):
+        contain = 0.0
+    return max(iou, contain * 0.92)
+
+
+def _zip_validates(img: Image.Image, runs: list, chars: list) -> bool:
+    """True if zipping ``runs`` 1:1 onto ``chars`` is plausible on its face.
+
+    Deliberately does *not* compare against ``atlas`` here.  Pixel-similarity
+    is the right tool for choosing between ambiguous *candidate*
+    segmentations (see ``_segment_nameplate_runs``), but this font has
+    genuine, harmless inter-label style variance -- e.g. 'O' and 'E' score a
+    perfect 1.0 across labels while a correctly-segmented 'C' can legitimately
+    score as low as ~0.3 against another correctly-segmented 'C' -- so using
+    it to gate an *already count-matched* zip produces false-positive
+    rejections.  Width is a far more robust signal for "is this actually one
+    character": every confirmed-correct single glyph across every MNMaps
+    label tops out around 7px (uppercase O), so a run wider than that,
+    regardless of how it happens to score, essentially never is one
+    character.  This alone is what catches MUSHROOM KINGDOM's 16px/12px
+    merged runs.
+    """
+    if len(runs) != len(chars):
+        return False
+    return all((x1 - x0) <= 8 for x0, x1 in runs)
+
+
+def _split_candidate_boundaries(runs: list) -> list:
+    """Candidate x-positions where a character boundary may fall.
+
+    Always includes every run's start/end (genuine ink/transparent
+    transitions from ``_alpha_runs``).  Also includes every interior column
+    of any run wider than 8px -- the widest confirmed single ROM glyph seen
+    across every MNMaps label (uppercase O, ~7px) -- since only an
+    anomalously wide run can plausibly hold more than one character.  This
+    keeps the search small while staying pixel-driven: it does not assume
+    *which* run is wrong or *where* inside it the true boundary sits, only
+    that a run wider than any real single glyph is worth searching.
+    """
+    bounds = set()
+    for x0, x1 in runs:
+        bounds.add(x0)
+        bounds.add(x1)
+        if (x1 - x0) > 8:
+            bounds.update(range(x0 + 1, x1))
+    return sorted(bounds)
+
+
+def _segment_nameplate_runs(
+    img: Image.Image, chars: list, atlas: dict, text: str, sprite_off: int
+) -> list | None:
+    """Find the best-supported partition of the label into len(chars) runs.
+
+    Vanilla MNMaps labels normally have one alpha run per character, but two
+    independent failure modes exist in the real ROM data: a tightly-kerned
+    pair whose rasters touch with no separating transparent column (too few
+    runs -- see SAFFRON CITY's O+N), and a single glyph containing its own
+    fully-transparent internal column (too many runs -- see DREAM LAND's R).
+    A label can even contain one of each simultaneously (see MUSHROOM
+    KINGDOM's "ROO" touching pair and separate KINGDOM-tail split, which
+    happened to cancel out to the *correct* raw run count and so passed the
+    naive count check while silently mis-segmenting several letters).
+
+    Rather than special-case each shape of error, this is one dynamic
+    program over candidate boundary columns (see
+    ``_split_candidate_boundaries``) that partitions the label into exactly
+    ``len(chars)`` regions while maximizing agreement with already-trusted
+    ROM glyph templates in ``atlas``.  Merging two runs into one character
+    and splitting one run into two characters are both just different
+    choices of which candidate boundaries to use -- no separate merge/split
+    code paths are needed.
+
+    A character with no template yet in ``atlas`` contributes no score to
+    the search (it neither helps nor penalizes a candidate boundary), so its
+    boundary is decided purely by its *neighbours'* agreement with ROM
+    truth; see the unknown-character guard below for how much of that is
+    required before an unseen glyph is trusted at all.
+
+    Returns None (never guesses) unless every already-known character in the
+    winning partition matches its ROM template strongly (>=0.72) and the
+    label average is high (>=0.84) -- the same conservative bar the
+    single-purpose recovery code used before this was generalized.
+    """
+    raw_runs = _alpha_runs(img)
+    if not raw_runs:
+        return None
+    n_chars = len(chars)
+    bounds = _split_candidate_boundaries(raw_runs)
+    if len(bounds) < n_chars + 1:
+        return None
+    n_b = len(bounds)
+
+    NEG = float("-inf")
+    # dp[k][j] = best cumulative similarity placing the first k characters
+    # using boundaries bounds[0..j], with character k-1 ending at bounds[j].
+    dp = [[NEG] * n_b for _ in range(n_chars + 1)]
+    known_count = [[0] * n_b for _ in range(n_chars + 1)]
+    back = [[-1] * n_b for _ in range(n_chars + 1)]
+    dp[0][0] = 0.0
+    sim_cache = {}
+
+    def region_score(ch, i, j):
+        x0, x1 = bounds[i], bounds[j]
+        key = (x0, x1, ch)
+        if key in sim_cache:
+            return sim_cache[key]
+        glyph = _glyph_mask(img, x0, x1)
+        if glyph.getchannel("A").getbbox() is None:
+            sim_cache[key] = None
+        elif ch not in atlas:
+            sim_cache[key] = (0.0, False)
+        else:
+            sim_cache[key] = (_glyph_similarity(glyph, atlas[ch]), True)
+        return sim_cache[key]
+
+    for k in range(1, n_chars + 1):
+        ch = chars[k - 1]
+        for j in range(k, n_b):
+            best_val, best_known, best_i = NEG, 0, -1
+            for i in range(k - 1, j):
+                if dp[k - 1][i] == NEG:
+                    continue
+                scored = region_score(ch, i, j)
+                if scored is None:
+                    continue
+                sim, is_known = scored
+                cand = dp[k - 1][i] + sim
+                if cand > best_val:
+                    best_val = cand
+                    best_known = known_count[k - 1][i] + (1 if is_known else 0)
+                    best_i = i
+            dp[k][j] = best_val
+            known_count[k][j] = best_known
+            back[k][j] = best_i
+
+    end_j = n_b - 1
+    if dp[n_chars][end_j] == NEG:
+        return None
+
+    boundary_idx = [end_j]
+    j = end_j
+    for k in range(n_chars, 0, -1):
+        i = back[k][j]
+        if i < 0:
+            return None
+        boundary_idx.append(i)
+        j = i
+    boundary_idx.reverse()
+    seg_runs = [(bounds[boundary_idx[k]], bounds[boundary_idx[k + 1]]) for k in range(n_chars)]
+
+    sims = []
+    for ch, (x0, x1) in zip(chars, seg_runs):
+        glyph = _glyph_mask(img, x0, x1)
+        if glyph.getchannel("A").getbbox() is None:
+            return None
+        sims.append(_glyph_similarity(glyph, atlas[ch]) if ch in atlas else None)
+
+    known_sims = [s for s in sims if s is not None]
+    unknown_count = len(sims) - len(known_sims)
+    if not known_sims:
+        return None
+    min_sim = min(known_sims)
+    avg_sim = sum(known_sims) / len(known_sims)
+    if min_sim < 0.72 or avg_sim < 0.84:
+        return None
+    # An unknown glyph's boundary rests entirely on its known neighbours;
+    # refuse to lean on that for more than a third of the label at once.
+    if unknown_count > max(1, n_chars // 3):
+        return None
+
+    print(
+        f"[{text}] segmented via glyph-atlas cross-validation: "
+        f"runs={seg_runs} min_sim={min_sim:.3f} avg_sim={avg_sim:.3f}"
+        + (f" ({unknown_count} newly-learned glyph(s))" if unknown_count else ""),
+        file=sys.stderr,
+    )
+    return seg_runs
+
+
 def build_rom_nameplate_glyphs(rom: bytes) -> dict:
     """
     Segment vanilla 96x10 MNMaps stage labels into a reusable glyph atlas.
 
-    The segmentation is deliberately strict: each non-space source character
-    must correspond to exactly one contiguous alpha run.  If that invariant
-    ever changes in another ROM revision, fail loudly instead of silently
-    generating a wrong-looking nameplate.
+    A naive one-alpha-run-per-character zip is trusted only when its run
+    count matches and every run is a plausible single-glyph width (see
+    ``_zip_validates`` -- pixel similarity is deliberately *not* used to
+    gate this, since this font has real, harmless inter-label style
+    variance, e.g. 'O'/'E' score a perfect 1.0 across labels while a
+    correctly-segmented 'C' can legitimately score ~0.3 against another
+    correctly-segmented 'C'; gating on that produced false-positive
+    rejections).  Whenever the naive zip is not plausible,
+    ``_segment_nameplate_runs`` searches for a fully cross-validated
+    partition instead (touching pairs, internally-split glyphs, or both at
+    once -- see its docstring).
+
+    Source labels are *not* rendered output (only the STAGES entries with a
+    ``name_text`` key are, and none of them are MNMaps labels), so a label
+    is only a means of harvesting reusable letter shapes.  If no whole-label
+    segmentation can be fully validated (this happens for real: MUSHROOM
+    KINGDOM's S/H/R region renders unusually narrow in a way no other label
+    corroborates, which is a separate phenomenon from the O+N/R-split cases
+    this function does resolve), fall back to harvesting only the
+    individual glyphs from the naive zip whose width is itself plausible,
+    and skip the rest -- never guess a boundary, but also do not let one
+    label's unrelated ambiguity block every other glyph it would otherwise
+    safely contribute.  A character that no label ever safely resolves
+    stays out of the atlas; ``render_name_png`` fails loudly if a stage
+    that actually needs it is missing it.
     """
     file_data = extract_file(rom, NAMEPLATE_RELOC_FILE)
     atlas = {}
+
+    def harvest(ch, x0, x1):
+        # Never add an implausibly wide sample to the atlas, regardless of
+        # which path produced it -- an unknown character inside a DP
+        # recovery scores 0 (neutral) and so has no similarity-based
+        # protection of its own; width is the backstop for that case too.
+        if (x1 - x0) > 8:
+            return
+        glyph = _glyph_mask(img, x0, x1)
+        # Prefer the widest sample for repeated letters; it is less likely
+        # to have been tightly kerned/cropped by a neighbouring glyph.
+        if ch not in atlas or glyph.width > atlas[ch].width:
+            atlas[ch] = glyph
 
     for text, sprite_off in NAMEPLATE_SOURCES:
         img = decode_ia4_sprite(file_data, sprite_off)
         runs = _alpha_runs(img)
         chars = [c for c in text if c != " "]
+
+        if _zip_validates(img, runs, chars):
+            for ch, (x0, x1) in zip(chars, runs):
+                harvest(ch, x0, x1)
+            continue
+
+        recovered = _segment_nameplate_runs(img, chars, atlas, text, sprite_off)
+        if recovered is not None:
+            for ch, (x0, x1) in zip(chars, recovered):
+                harvest(ch, x0, x1)
+            continue
+
         if len(runs) != len(chars):
             raise ValueError(
                 f"MNMaps nameplate {text!r} @0x{sprite_off:X}: found {len(runs)} "
-                f"glyph runs, expected {len(chars)}. Refusing host-font fallback."
+                f"glyph runs, expected {len(chars)}; no glyph-atlas-validated "
+                f"segmentation found. Refusing host-font fallback."
             )
+        skipped = [ch for ch, (x0, x1) in zip(chars, runs) if (x1 - x0) > 8]
+        print(
+            f"[{text}] no fully-validated segmentation found; harvesting only "
+            f"the {len(chars) - len(skipped)} plausible-width glyph(s) from "
+            f"the naive zip, skipping {skipped} (implausibly wide run(s))",
+            file=sys.stderr,
+        )
         for ch, (x0, x1) in zip(chars, runs):
-            glyph = _glyph_mask(img, x0, x1)
-            # Prefer the widest sample for repeated letters; it is less likely
-            # to have been tightly kerned/cropped by a neighbouring glyph.
-            if ch not in atlas or glyph.width > atlas[ch].width:
-                atlas[ch] = glyph
+            if (x1 - x0) <= 8:
+                harvest(ch, x0, x1)
 
     # The vanilla stage names contain no V.  Seed only that missing letter from
     # the game's own menu font rather than from a host font.
@@ -652,9 +970,10 @@ def extract_emblem(stage: dict, rom: bytes, output_dir: Path) -> None:
 
     bm      = bitmaps[0]
     buf_off = bm["buf_off"]
-    # IA4: (width_img) bytes per row (* height rows), width_img = round_up(width, 8)
-    # bm["width"] is the DMA-padded row width (width_img field).
-    row_stride = (bm["width"] + 1) // 2
+    # IA4: width_img is the DMA/source row width; width is only how many
+    # texels are drawn.  Use width_img for source addressing.
+    source_width = bm["width_img"] if bm["width_img"] > 0 else bm["width"]
+    row_stride = (source_width + 1) // 2
     raw_bytes  = row_stride * src_h
 
     if buf_off < 0 or buf_off + raw_bytes > len(file_data):
@@ -665,8 +984,12 @@ def extract_emblem(stage: dict, rom: bytes, output_dir: Path) -> None:
 
     raw_strip = file_data[buf_off:buf_off + raw_bytes]
 
+    # Sprite-library IA4 data is pre-swizzled for TMEM LOAD_BLOCK. Mirror the
+    # runtime Vita sprite fixup before decoding it linearly.
+    raw_strip = unswizzle_ia4_strip(raw_strip, source_width, src_h)
+
     # Decode IA4 -> RGBA8888.
-    rgba8 = ia4_to_rgba8888(raw_strip, src_w, src_h)
+    rgba8 = ia4_to_rgba8888(raw_strip, src_w, src_h, source_width)
 
     # Build PIL image and upscale to EMBLEM_W x EMBLEM_H via LANCZOS.
     src_img = Image.frombytes("RGBA", (src_w, src_h), rgba8)

@@ -45,10 +45,16 @@
 #include <libultraship/libultraship.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
+
+#ifdef __vita__
+#include <psp2/io/fcntl.h>
+#include <psp2/io/stat.h>
+#endif
 
 /* PR/sp.h uses _Static_assert (C11) and cannot be included from C++.
  * Opaque type tags. */
@@ -573,19 +579,174 @@ static void reregisterEntry(const CacheEntry &e) {
 }
 
 // ---------------------------------------------------------------------------
+// PNG_DIAG — diagnostic whole-file read used ahead of every stb_image decode.
+//
+// stbi_load(path, ...) does its own fopen/fread internally, so nothing about
+// the bytes it actually saw was ever observable. This reads the file
+// ourselves (sceIo* on Vita, matching O2rArchive.cpp's pattern; C stdio
+// elsewhere) and decodes via stbi_load_from_memory() on that exact buffer,
+// so every byte logged here is provably identical to what stb_image decodes
+// — no second, invisible read, no doubt about which bytes actually failed.
+//
+// Logs: full path, on-disk size (from a real stat, not our read), bytes
+// actually read, first 16 bytes hex, whether the PNG signature matches, and
+// a CRC32 of the read buffer. Compare that CRC32 against the same file's
+// bytes on the host (`python3 -c "import zlib;
+// print(hex(zlib.crc32(open('<path>','rb').read())))"`) to tell apart:
+//   A) bytes on Vita differ from what was deployed  -> CRC32 mismatch, sig_ok
+//      may still be "yes" if only later bytes differ.
+//   B) partial read                                  -> read_bytes < fs_size.
+//   C) bytes correct but stb_image rejects them       -> CRC32 matches the
+//      host file, sig_ok=yes, but stbi_load_from_memory still fails; check
+//      the PNG_DIAG_FAIL line's stbi_failure_reason().
+//   D) memory corrupted between read and decode       -> would show as a
+//      CRC32 recomputed on the same buffer right before stbi_load_from_memory
+//      not matching the one logged at read time (see the second CRC32 in
+//      PNG_DIAG_FAIL); anything else has no way to explain a mismatch there
+//      since it's the exact pointer stb_image is handed.
+// No retries: any failure here returns nullptr exactly once, unchanged from
+// the pre-instrumentation behaviour.
+// ---------------------------------------------------------------------------
+
+static uint32_t crc32OfBytes(const uint8_t *data, size_t len) {
+    uint32_t crc = ~0u;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            uint32_t mask = ~((crc & 1u) - 1u);  // 0 or 0xFFFFFFFF, no branch
+            crc = (crc >> 1) ^ (0xEDB88320u & mask);
+        }
+    }
+    return ~crc;
+}
+
+static uint8_t *readWholeFileDiag(const std::string &path, size_t *out_size) {
+    *out_size = 0;
+    long long fs_size = -1;
+    uint8_t *buf = nullptr;
+    size_t nread = 0;
+
+#ifdef __vita__
+    SceIoStat stat;
+    std::memset(&stat, 0, sizeof(stat));
+    int statRc = sceIoGetstat(path.c_str(), &stat);
+    if (statRc < 0) {
+        port_log("CSS stage assets: PNG_DIAG path=%s stat_rc=0x%08X (getstat failed)\n",
+                 path.c_str(), (unsigned int)statRc);
+        return nullptr;
+    }
+    fs_size = (long long)stat.st_size;
+
+    SceUID fd = sceIoOpen(path.c_str(), SCE_O_RDONLY, 0);
+    if (fd < 0) {
+        port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld open_rc=0x%08X (open failed)\n",
+                 path.c_str(), fs_size, (unsigned int)fd);
+        return nullptr;
+    }
+    if (fs_size <= 0) {
+        port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld (zero/negative size)\n",
+                 path.c_str(), fs_size);
+        sceIoClose(fd);
+        return nullptr;
+    }
+    buf = static_cast<uint8_t *>(std::malloc((size_t)fs_size));
+    if (!buf) {
+        port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld (malloc failed)\n",
+                 path.c_str(), fs_size);
+        sceIoClose(fd);
+        return nullptr;
+    }
+    int readRc = sceIoRead(fd, buf, (SceSize)fs_size);
+    sceIoClose(fd);
+    if (readRc < 0) {
+        port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld read_rc=0x%08X (read failed)\n",
+                 path.c_str(), fs_size, (unsigned int)readRc);
+        std::free(buf);
+        return nullptr;
+    }
+    nread = (size_t)readRc;
+#else
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) {
+        port_log("CSS stage assets: PNG_DIAG path=%s (fopen failed)\n", path.c_str());
+        return nullptr;
+    }
+    std::fseek(f, 0, SEEK_END);
+    long tell = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    fs_size = (long long)tell;
+    if (fs_size <= 0) {
+        port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld (zero/negative size)\n",
+                 path.c_str(), fs_size);
+        fclose(f);
+        return nullptr;
+    }
+    buf = static_cast<uint8_t *>(std::malloc((size_t)fs_size));
+    if (!buf) {
+        port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld (malloc failed)\n",
+                 path.c_str(), fs_size);
+        fclose(f);
+        return nullptr;
+    }
+    nread = std::fread(buf, 1, (size_t)fs_size, f);
+    fclose(f);
+#endif
+
+    static constexpr uint8_t kPNGSig[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+    bool sig_ok = nread >= 8 && std::memcmp(buf, kPNGSig, 8) == 0;
+
+    char hex16[64];
+    size_t hexlen = nread < 16 ? nread : 16;
+    size_t hexpos = 0;
+    for (size_t i = 0; i < hexlen; ++i) {
+        hexpos += (size_t)std::snprintf(hex16 + hexpos, sizeof(hex16) - hexpos,
+                                         i + 1 < hexlen ? "%02X " : "%02X", buf[i]);
+    }
+    if (hexlen == 0) hex16[0] = '\0';
+
+    uint32_t crc = crc32OfBytes(buf, nread);
+
+    port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld read_bytes=%u "
+             "partial=%s first16=[%s] sig_ok=%s crc32=0x%08X\n",
+             path.c_str(), fs_size, (unsigned int)nread,
+             ((long long)nread != fs_size) ? "YES" : "no",
+             hex16, sig_ok ? "yes" : "NO", crc);
+
+    *out_size = nread;
+    return buf;
+}
+
+// ---------------------------------------------------------------------------
 // PNG loader — loads a PNG and converts to RGBA16 BE.
 // Expected dimensions are validated; returns nullptr on mismatch/error.
 // ---------------------------------------------------------------------------
 
 static uint8_t *loadPNGAsRGBA16BE(const std::string &path, int expected_w, int expected_h) {
-    int w = 0, h = 0, channels = 0;
-    uint8_t *rgba8 = stbi_load(path.c_str(), &w, &h, &channels, 4);
-    if (!rgba8) {
-        port_log("CSS stage assets: stbi_load failed: %s (%s)\n",
-                 path.c_str(),
-                 stbi_failure_reason() ? stbi_failure_reason() : "?");
+    size_t file_size = 0;
+    uint8_t *file_buf = readWholeFileDiag(path, &file_size);
+    if (!file_buf) {
+        // readWholeFileDiag already logged the exact failure point (stat,
+        // open, zero-size, or read) — nothing more to add here.
         return nullptr;
     }
+
+    // D) buffer-corruption check: recompute the CRC32 on the exact pointer
+    // about to be handed to stb_image, immediately before the call. Any
+    // difference from the PNG_DIAG line's crc32 means something wrote to
+    // this buffer between the read above and here.
+    uint32_t pre_decode_crc = crc32OfBytes(file_buf, file_size);
+
+    int w = 0, h = 0, channels = 0;
+    uint8_t *rgba8 = stbi_load_from_memory(file_buf, (int)file_size, &w, &h, &channels, 4);
+    if (!rgba8) {
+        port_log("CSS stage assets: PNG_DIAG_FAIL path=%s pre_decode_crc32=0x%08X "
+                 "stbi_failure_reason=%s\n",
+                 path.c_str(), pre_decode_crc,
+                 stbi_failure_reason() ? stbi_failure_reason() : "?");
+        std::free(file_buf);
+        return nullptr;
+    }
+    std::free(file_buf);
 
     if (w != expected_w || h != expected_h) {
         port_log("CSS stage assets: %s — expected %dx%d, got %dx%d; skipping.\n",
@@ -607,14 +768,26 @@ static uint8_t *loadPNGAsRGBA16BE(const std::string &path, int expected_w, int e
 // Used for emblem sprites where matching the ROM's IA4 single-bitmap format
 // avoids TMEM-overflow / multi-bitmap-strip rendering bugs entirely.
 static uint8_t *loadPNGAsIA4(const std::string &path, int expected_w, int expected_h) {
-    int w = 0, h = 0, channels = 0;
-    uint8_t *rgba8 = stbi_load(path.c_str(), &w, &h, &channels, 4);
-    if (!rgba8) {
-        port_log("CSS stage assets: stbi_load failed: %s (%s)\n",
-                 path.c_str(),
-                 stbi_failure_reason() ? stbi_failure_reason() : "?");
+    size_t file_size = 0;
+    uint8_t *file_buf = readWholeFileDiag(path, &file_size);
+    if (!file_buf) {
         return nullptr;
     }
+
+    uint32_t pre_decode_crc = crc32OfBytes(file_buf, file_size);
+
+    int w = 0, h = 0, channels = 0;
+    uint8_t *rgba8 = stbi_load_from_memory(file_buf, (int)file_size, &w, &h, &channels, 4);
+    if (!rgba8) {
+        port_log("CSS stage assets: PNG_DIAG_FAIL path=%s pre_decode_crc32=0x%08X "
+                 "stbi_failure_reason=%s\n",
+                 path.c_str(), pre_decode_crc,
+                 stbi_failure_reason() ? stbi_failure_reason() : "?");
+        std::free(file_buf);
+        return nullptr;
+    }
+    std::free(file_buf);
+
     if (w != expected_w || h != expected_h) {
         port_log("CSS stage assets: %s — expected %dx%d, got %dx%d; skipping.\n",
                  path.c_str(), expected_w, expected_h, w, h);

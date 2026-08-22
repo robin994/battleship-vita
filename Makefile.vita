@@ -276,6 +276,7 @@ SSB64_SOBJ_TRACE_DETAIL ?= 1
 
 CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-short-enums -fsigned-char -MMD -MP \
 	-DSSB64_SOBJ_TRACE_DETAIL=$(SSB64_SOBJ_TRACE_DETAIL) \
+	-D__vita__ -DSSB64_VITA_BUILD=1 \
 	-I$(VITAGL_DIR)/source \
 	$(foreach dir,$(INCLUDES),-I$(dir)) -fno-strict-aliasing -DMA_NO_RUNTIME_LINKING \
 	-DNDEBUG \

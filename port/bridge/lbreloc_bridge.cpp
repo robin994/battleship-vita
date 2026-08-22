@@ -129,6 +129,48 @@ static s32 sLBRelocExternFileIDsNum;
 static s32 sLBRelocExternFileIDsMax;
 static void *sLBRelocExternFileHeap;
 
+#if defined(__vita__) || defined(SSB64_VITA_BUILD)
+#define SSB64_RELOC_VITA_BUILD 1
+#endif
+
+#ifdef SSB64_RELOC_VITA_BUILD
+/*
+ * Vita user pointers used by this port are KSEG-looking 0x8xxxxxxx values.
+ * A recurring hardware crash reaches memcpy with destinations such as
+ * 0x06f6e6f0: exactly the value produced when an N64 KSEG0->physical mask
+ * strips the high bits from 0x86f6e6f0.  Host reloc destinations must never
+ * be physical N64 addresses, so repair that representation at every reloc
+ * heap boundary and refuse any other low pointer before touching memory.
+ */
+static void *portRelocNormalizeVitaHostPointer(void *ptr, const char *where)
+{
+    uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+
+    if ((addr != 0u) && (addr <= 0x1FFFFFFFu))
+    {
+        uintptr_t repaired = addr | 0x80000000u;
+        static unsigned int sRepairCount = 0;
+        if (sRepairCount < 64u)
+        {
+            port_log("SSB64: RELOC_VITA_PTR_REPAIR where=%s low=%p repaired=%p count=%u\n",
+                     where ? where : "?", ptr, reinterpret_cast<void *>(repaired), sRepairCount);
+        }
+        sRepairCount++;
+        return reinterpret_cast<void *>(repaired);
+    }
+    return ptr;
+}
+
+static bool portRelocVitaPointerIsWritableCandidate(const void *ptr)
+{
+    uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+    return (addr == 0u) || (addr >= 0x80000000u);
+}
+#else
+static inline void *portRelocNormalizeVitaHostPointer(void *ptr, const char *) { return ptr; }
+static inline bool portRelocVitaPointerIsWritableCandidate(const void *) { return true; }
+#endif
+
 struct PortRelocFileRange
 {
 	uintptr_t base;
@@ -690,6 +732,9 @@ extern "C" void portRelocLoadFileFromBytes(
 	unsigned int    extern_count,
 	int             force_figatree_fixup)
 {
+	void *ram_dst_raw = ram_dst;
+	ram_dst = portRelocNormalizeVitaHostPointer(ram_dst, "LoadFileFromBytes");
+
 	/* portRelocIsFighterFigatreeFile looks up gRelocFileTable[file_id]
 	 * to match the "reloc_animations/" path prefix. Mod-registered file
 	 * IDs sit outside the vanilla table range so the path lookup fails
@@ -715,8 +760,9 @@ extern "C" void portRelocLoadFileFromBytes(
 	// site's inputs are always captured, not just when that env var happens
 	// to be set for a debug run.
 	port_log("SSB64: RELOC_LOAD_ENTRY file_id=%u path=%s input_bytes=%p input_size=%u "
-	         "allocation_result=%p allocation_size=%u reloc_table_offset=%u,%u extern_count=%u data_base=%p\n",
-	         file_id, table_path ? table_path : "(null)", src_bytes, src_size, ram_dst, bytes_num,
+	         "allocation_raw=%p allocation_result=%p allocation_size=%u reloc_table_offset=%u,%u "
+	         "extern_count=%u data_base=%p\n",
+	         file_id, table_path ? table_path : "(null)", src_bytes, src_size, ram_dst_raw, ram_dst, bytes_num,
 	         (unsigned)reloc_intern_offset, (unsigned)reloc_extern_offset, extern_count, ram_dst);
 
 	// Gated: SSB64_LOG_LBRELOC_LOAD=1 logs every file load. Helpful when
@@ -742,12 +788,19 @@ extern "C" void portRelocLoadFileFromBytes(
 
 	if (ram_dst == nullptr)
 	{
-		// Guard: the crash's fault address strongly suggests a bad dst.
-		// This can't be recovered here (caller already committed to this
-		// allocation), but it's better to log and bail than to memcpy into
-		// a null/garbage pointer and data-abort with no trace at all.
 		port_log("SSB64: RELOC_LOAD_ABORT file_id=%u reason=null-allocation_result input_size=%u "
 		         "allocation_size=%u\n", file_id, src_size, bytes_num);
+		return;
+	}
+
+	if (!portRelocVitaPointerIsWritableCandidate(ram_dst))
+	{
+		/* Fail closed rather than data-abort in SceLibKernel::memcpy.  A low
+		 * pointer that was not the recoverable 0x0xxxxxxx KSEG form is not a
+		 * valid host destination. */
+		port_log("SSB64: RELOC_LOAD_ABORT file_id=%u reason=invalid-vita-dst raw=%p normalized=%p "
+		         "input_size=%u allocation_size=%u\n",
+		         file_id, ram_dst_raw, ram_dst, src_size, bytes_num);
 		return;
 	}
 
@@ -1363,6 +1416,7 @@ void* lbRelocGetExternBufferFile(u32 id)
 	auto relocFile = portLoadRelocResource(id);
 	if (!relocFile) { return NULL; }
 
+	sLBRelocExternFileHeap = portRelocNormalizeVitaHostPointer(sLBRelocExternFileHeap, "ExternBufferCursor");
 	void *file_alloc = (void *)LBRELOC_CACHE_ALIGN((uintptr_t)sLBRelocExternFileHeap);
 	size_t file_size = relocFile->Data.size();
 	sLBRelocExternFileHeap = (void *)((uintptr_t)file_alloc + file_size);
@@ -1374,6 +1428,7 @@ void* lbRelocGetExternBufferFile(u32 id)
 
 void* lbRelocGetExternHeapFile(u32 id, void *heap)
 {
+	heap = portRelocNormalizeVitaHostPointer(heap, "ExternHeapArg");
 	sLBRelocExternFileHeap = heap;
 	return lbRelocGetExternBufferFile(id);
 }
@@ -1386,6 +1441,8 @@ void* lbRelocGetInternBufferFile(u32 id)
 	auto relocFile = portLoadRelocResource(id);
 	if (!relocFile) { return NULL; }
 
+	sLBRelocInternBuffer.heap_ptr = portRelocNormalizeVitaHostPointer(sLBRelocInternBuffer.heap_ptr, "InternBufferCursor");
+	sLBRelocInternBuffer.heap_end = portRelocNormalizeVitaHostPointer(sLBRelocInternBuffer.heap_end, "InternBufferEnd");
 	void *file_alloc = (void *)LBRELOC_CACHE_ALIGN((uintptr_t)sLBRelocInternBuffer.heap_ptr);
 	size_t file_size = relocFile->Data.size();
 
@@ -1412,6 +1469,7 @@ void* lbRelocGetForceExternBufferFile(u32 id)
 	auto relocFile = portLoadRelocResource(id);
 	if (!relocFile) { return NULL; }
 
+	sLBRelocExternFileHeap = portRelocNormalizeVitaHostPointer(sLBRelocExternFileHeap, "ForceExternBufferCursor");
 	void *file_alloc = (void *)LBRELOC_CACHE_ALIGN((uintptr_t)sLBRelocExternFileHeap);
 	size_t file_size = relocFile->Data.size();
 	sLBRelocExternFileHeap = (void *)((uintptr_t)file_alloc + file_size);
@@ -1423,6 +1481,7 @@ void* lbRelocGetForceExternBufferFile(u32 id)
 
 void* lbRelocGetForceExternHeapFile(u32 id, void *heap)
 {
+	heap = portRelocNormalizeVitaHostPointer(heap, "ForceExternHeapArg");
 	/* The extern cursor is shared, so [heap, old_cursor) is not a safe
 	 * ownership boundary. Evict only the prior batch recorded for this exact
 	 * force heap and only ranges whose recorded location is Force. */
@@ -1477,6 +1536,7 @@ extern "C" void portRelocSetExternFileHeap(void *heap)
 
 size_t lbRelocLoadFilesExtern(u32 *ids, u32 len, void **files, void *heap)
 {
+	heap = portRelocNormalizeVitaHostPointer(heap, "LoadFilesExternBatch");
 	sLBRelocExternFileHeap = heap;
 
 	u32 failed_ids[8];
@@ -1529,6 +1589,7 @@ size_t lbRelocLoadFilesExtern(u32 *ids, u32 len, void **files, void *heap)
 
 size_t lbRelocLoadFilesIntern(u32 *ids, u32 len, void **files)
 {
+	sLBRelocInternBuffer.heap_ptr = portRelocNormalizeVitaHostPointer(sLBRelocInternBuffer.heap_ptr, "LoadFilesInternBatch");
 	void *heap = sLBRelocInternBuffer.heap_ptr;
 
 	u32 failed_ids[8];
@@ -1785,9 +1846,25 @@ void lbRelocInitSetup(LBRelocSetup *setup)
 	sLBRelocInternBuffer.rom_table_hi = setup->table_addr +
 		((setup->table_files_num + 1) * sizeof(LBTableEntry));
 
-	// Heap management (still used — callers allocate and pass heaps)
-	sLBRelocInternBuffer.heap_start = sLBRelocInternBuffer.heap_ptr = setup->file_heap;
-	sLBRelocInternBuffer.heap_end = (void *)((uintptr_t)setup->file_heap + setup->file_heap_size);
+	// Heap management (still used — callers allocate and pass heaps).
+	// Normalize here as well: setup->file_heap may have passed through legacy
+	// N64 address-conversion code before reaching the bridge.
+	void *setup_heap = portRelocNormalizeVitaHostPointer(setup->file_heap, "InitSetupHeap");
+	sLBRelocInternBuffer.heap_start = sLBRelocInternBuffer.heap_ptr = setup_heap;
+	sLBRelocInternBuffer.heap_end = (setup_heap != nullptr)
+	    ? (void *)((uintptr_t)setup_heap + setup->file_heap_size)
+	    : nullptr;
+#ifdef SSB64_RELOC_VITA_BUILD
+	{
+		static bool sLoggedVitaRelocGuard = false;
+		if (!sLoggedVitaRelocGuard)
+		{
+			sLoggedVitaRelocGuard = true;
+			port_log("SSB64: RELOC_VITA_GUARD active build_macro=1 heap_raw=%p heap=%p size=%u\n",
+			         setup->file_heap, setup_heap, (unsigned)setup->file_heap_size);
+		}
+	}
+#endif
 
 	// Status buffers (file caching)
 	sLBRelocInternBuffer.status_buffer_num = 0;
