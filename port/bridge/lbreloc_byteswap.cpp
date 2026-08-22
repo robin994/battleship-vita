@@ -1084,7 +1084,32 @@ extern "C" void portRelocByteSwapBlob(void *data, size_t size, unsigned int file
 		         p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
 	}
 
-	// Pass 2: DL-guided fixup
+#if defined(__vita__)
+	/*
+	 * Vita must not infer display-list commands by scanning every 8-byte pair
+	 * in the reloc blob.  Palette, texel, animation and struct bytes can
+	 * coincidentally have a GBI-looking opcode and the old pass2 would then
+	 * mutate an unrelated vertex/texture range in place before the model was
+	 * ever constructed.
+	 *
+	 * Keep the deterministic pass1 u32 conversion here.  Vertex and texture
+	 * lane-order fixups are already performed lazily at the real Fast3D
+	 * G_VTX / LOADBLOCK / LOADTILE / LOADTLUT execution sites, while the
+	 * relocation-chain fixups remain available for genuine pointer slots.
+	 */
+	static bool sLazyFixupModeLogged = false;
+	if (!sLazyFixupModeLogged)
+	{
+		port_log("SSB64: RELOC_FIXUP_MODE vita pass2_scan=disabled lazy_vtx_tex=enabled\n");
+		sLazyFixupModeLogged = true;
+	}
+	if (file_id == 52 || file_id == 108 || file_id == 296 || file_id == 313)
+	{
+		port_log("SSB64: RELOC_FIXUP_LOAD file=%u pass1=done pass2_scan=skipped\n", file_id);
+	}
+#else
+	// Pass 2: legacy DL-guided fixup scan.  This is intentionally disabled
+	// on Vita because it cannot distinguish arbitrary blob data from GBI.
 	size_t num_words = size / 4;
 	const uint32_t *words = static_cast<const uint32_t *>(data);
 
@@ -1095,6 +1120,7 @@ extern "C" void portRelocByteSwapBlob(void *data, size_t size, unsigned int file
 	{
 		apply_fixups(data, size, regions, file_id);
 	}
+#endif
 }
 
 // ============================================================

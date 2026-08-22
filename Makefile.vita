@@ -332,14 +332,23 @@ build/f3d.o2r: $(wildcard libultraship/src/fast/shaders/*/*)
 	rm -f $@
 	cd libultraship/src/fast && zip -r -X -q $(CURDIR)/$@ shaders
 
-prepare: build/f $(OBJS_PREPARE)
+.PHONY: prepare prepare-clean objects clean
 
-build/f:
-	mkdir -p build/f
+# Keep build/f as a short-path linker staging directory, but make it a real
+# dependency of the final ELF instead of a manually-synchronised snapshot.
+# Every prepare starts from an empty staging dir so removed/reordered sources
+# cannot leave stale numbered objects behind.
+prepare: prepare-clean $(OBJS_PREPARE)
 
-%.ok:
+prepare-clean:
+	@rm -rf build/f
+	@mkdir -p build/f
+
+# A .ok copy now depends on its real object. This lets `make all` build the
+# source object first instead of requiring a separate manual `make objects`.
+%.ok: %.o | prepare-clean
 	$(eval gen_num=$(shell echo $$(($(gen_num)+1))))
-	@cp $(@:k=) build/f/$(gen_num).o
+	@cp $< build/f/$(gen_num).o
 
 %.oc:
 	@rm -rf $(@:c=)
@@ -349,15 +358,19 @@ build/f:
 	$(PREFIX)-strip -g $<
 	vita-elf-create $< $@
 
-build/battleship.elf: $(FINAL_OBJS)
+# `FINAL_OBJS := $(wildcard build/f/*.o)` used to be evaluated while parsing
+# the Makefile, before prepare had refreshed build/f. That is the stale-build
+# footgun documented in docs/bugs/vita_stale_build_desync_2026-08-18.md.
+# Depend on prepare and let the shell expand build/f only after staging ends.
+build/battleship.elf: prepare
 	@mkdir -p build
-	$(CXX) $(CXXFLAGS) $^ $(LIBS) -o $@
+	$(CXX) $(CXXFLAGS) build/f/*.o $(LIBS) -o $@
 
 objects: $(OBJS)
 
 clean: $(OBJS_CLEAN)
 	@rm -f $(DEPS)
-	@rm -rf build/battleship.velf build/battleship.elf build/battleship.elf.unstripped.elf $(FINAL_OBJS) build/eboot.bin build/battleship.vpk build/param.sfo
+	@rm -rf build/battleship.velf build/battleship.elf build/battleship.elf.unstripped.elf build/f build/eboot.bin build/battleship.vpk build/param.sfo
 
 # ── CSS stage asset extraction (port-introduced stages) ─────────────────────
 # port/css_icons/port_css_stage_assets.cpp loads final_destination/metal_cavern/
