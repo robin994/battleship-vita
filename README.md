@@ -198,6 +198,51 @@ This produces `build/battleship.vpk` (plus the intermediate `build/battleship.el
 it directly under [Vita3K](https://vita3k.org). Everything under `build/` is
 generated and gitignored; nothing there is checked into the repo.
 
+#### Generating and installing the required data (BattleShip.o2r + assets)
+
+The VPK is just the engine — **it ships no game data.** Same rule as every other
+platform (see [above](#no-copyrighted-assets-are-included-in-this-repository)):
+you supply your own legally-owned ROM, and every byte derived from it is
+generated locally, never distributed with the port. The Vita build additionally
+does **not** extract on-device (there's no equivalent of the desktop first-run
+wizard here — see [`docs/architecture.md`](docs/architecture.md) for why), so this
+has to happen on your dev machine first, then be copied onto the memory card.
+
+1. **Generate the data**, from the repo root, with your own ROM:
+
+   ```sh
+   scripts/extract-vita-data.sh /path/to/baserom.us.z64
+   ```
+
+   This builds a one-off host copy of `torch` (cached afterwards under
+   `build-torch-host/` so repeat runs are instant), extracts `BattleShip.o2r`,
+   and derives the extra-stage CSS icon PNGs
+   (`tools/derive_stage_assets.py`) — all laid out under
+   `dist/vita-data-deploy/ux0/data/battleship/`, mirroring the Vita's own
+   app-data path exactly, plus a matching `dist/vita-data-deploy.zip`.
+
+2. **Copy that onto the memory card** at `ux0:data/battleship/`, so you end up
+   with:
+
+   ```
+   ux0:data/battleship/BattleShip.o2r
+   ux0:data/battleship/assets/css_icons/*.png
+   ```
+
+   Any transfer method works (VitaShell's built-in FTP/USB, a memory-card
+   reader, etc.). If you're iterating with
+   [vitacompanion](https://github.com/devnoname120/vitacompanion) already
+   running (see [`CLAUDE.md`](CLAUDE.md)'s PS Vita Port section), the same FTP
+   server on port 1337 will take it too:
+
+   ```sh
+   curl -T dist/vita-data-deploy/ux0/data/battleship/BattleShip.o2r \
+     "ftp://$VITA_IP:1337/ux0:/data/battleship/BattleShip.o2r"
+   ```
+
+3. **Install and launch `battleship.vpk`.** With the data already in place, the
+   only thing left is the one-time shader prewarm described next.
+
 **First launch is slow on purpose.** Before any gameplay, the Vita build
 precompiles every Fast3D shader combination observed across a full boot/attract
 capture (`SceShaccCg`'s runtime compiler becomes unreliable once the game's own
@@ -205,7 +250,8 @@ assets have consumed enough of the process heap — compiling everything early,
 while heap is still small, sidesteps that). This first-run prewarm can take two to
 three minutes and shows a progress bar; successful programs are then cached to
 `ux0:data/battleship/shader_cache`, so subsequent launches load them from disk
-instead of recompiling.
+instead of recompiling. Don't interrupt the app during this window — let the
+progress bar finish once.
 
 ## Architecture
 
@@ -430,6 +476,23 @@ PRs are welcome from anyone. If you're opening a bug report, the most useful thi
 - Reference ports I learned from and adapted code from: [Starship](https://github.com/HarbourMasters/Starship) (SF64) and [Ship of Harkinian](https://github.com/HarbourMasters/Shipwright) (OoT) — both MIT-licensed by The Harbour Masters; see [`LICENSE`](LICENSE) for the per-file attribution.
 - Reference ports I learned from but did not borrow code from: [SM64 PC Port](https://github.com/sm64-port/sm64-port) (SM64), [SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart) (MK64).
 - Port work: me ([JRickey](https://github.com/JRickey)), with an enormous amount of help, debugging, and feature suggestions from contributors in our Discord server.
+
+### PS Vita port credits
+
+The PS Vita target (this fork — see [PS Vita re-forks](#ps-vita-re-forks-a-further-layer-on-top)
+above) has its own additional thanks:
+
+- **[Rinnegatamante](https://github.com/Rinnegatamante)** — for support throughout PS Vita
+  development. The rendering layer builds on his [vitaGL](https://github.com/Rinnegatamante/vitaGL)
+  fork and Vita-patched `libultraship` rendering backend (see the `libultraship`
+  re-fork notes above), plus the memory-pressure tuning (`vglSetParamBufferSize`,
+  double- instead of triple-buffering) documented in `CLAUDE.md`'s PS Vita Port section.
+- **Standard-Republic** — for the LiveArea assets (`livearea/icon0.png`, `bg.png`,
+  `startup.png`, `template.xml`) bundled into `battleship.vpk`.
+- Development support for the PS Vita port was a mix of [Claude](https://claude.ai)
+  and [Codex](https://openai.com/codex) working alongside real-hardware testing —
+  see `CLAUDE.md`'s PS Vita Port section for the current handoff notes and hard-won
+  hardware findings those sessions left behind.
 
 This project is **not affiliated with, endorsed by, or authorized by Nintendo.** It is a personal, non-commercial research and preservation effort. Do not upload ROMs, extracted `.o2r` archives, or any other Nintendo-owned data to issues or pull requests.
 
