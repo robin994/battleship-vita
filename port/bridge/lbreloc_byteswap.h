@@ -240,6 +240,20 @@ int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
 void portRelocFixupVertexAtRuntime(const void *addr, unsigned int num_vtx);
 
 /**
+ * Decode reloc-backed Vtx data into a caller-provided host-order buffer.
+ *
+ * Vita uses this from GfxSpVertex so vertex normalization is type-driven and
+ * non-destructive: the reloc blob remains in post-pass1 form, eliminating
+ * chain/runtime double-fixups and file-specific exceptions.
+ *
+ * Returns 1 when reloc-backed vertices were decoded, 0 when addr is not in a
+ * reloc blob (caller should use the original pointer), and -1 on invalid input
+ * or an out-of-bounds reloc range.
+ */
+int portRelocDecodeVerticesForRuntime(const void *addr, unsigned int num_vtx,
+                                      void *out_vertices, size_t out_size);
+
+/**
  * Lazy texture byte-order fixup at G_LOADBLOCK / G_LOADTLUT execute time.
  *
  * Called from libultraship's GfxDpLoadBlock / GfxDpLoadTile / GfxDpLoadTlut

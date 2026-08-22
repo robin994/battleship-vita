@@ -953,7 +953,7 @@ static void scan_display_lists(const uint32_t *words, size_t num_words,
 // commands.  Unlike the legacy pass2 this does not infer SETTIMG/LOADBLOCK or
 // TLUT regions from arbitrary blob bytes, so palette/texture data cannot be
 // mutated merely because it happens to resemble a GBI command pair.
-static void scan_vertex_lists_strict(const uint32_t *words, size_t num_words,
+static __attribute__((unused)) void scan_vertex_lists_strict(const uint32_t *words, size_t num_words,
                                      size_t file_size, std::vector<FixupRegion> &regions)
 {
 	const uint8_t *bytes = reinterpret_cast<const uint8_t *>(words);
@@ -1142,29 +1142,18 @@ extern "C" void portRelocByteSwapBlob(void *data, size_t size, unsigned int file
 
 #if defined(__vita__)
 	/*
-	 * Vita: pre-normalize only vertex arrays referenced by structurally valid
-	 * F3DEX2 G_VTX commands.  Texture/TLUT fixups remain lazy at the actual
-	 * renderer execution sites; we deliberately do not restore the old broad
-	 * pass2 scan that could mutate arbitrary palette/struct bytes.
+	 * Vita: do not mutate vertex or texture payloads by scanning the raw blob.
+	 * Reloc-file G_VTX operands are still chain-encoded at this point, so a
+	 * blob scan cannot reliably identify the real arrays.  Vertex byte-order
+	 * normalization is deferred to GfxSpVertex(), where the running interpreter
+	 * has already proven that the resolved pointer is a real Vtx array.
+	 * Texture/TLUT normalization likewise remains lazy at the actual load site.
 	 */
-	size_t num_words = size / 4;
-	const uint32_t *words = static_cast<const uint32_t *>(data);
-	std::vector<FixupRegion> vertex_regions;
-	scan_vertex_lists_strict(words, num_words, size, vertex_regions);
-	if (!vertex_regions.empty())
+	static bool sVitaLazyOnlyModeLogged = false;
+	if (!sVitaLazyOnlyModeLogged)
 	{
-		apply_fixups(data, size, vertex_regions, file_id);
-	}
-	static bool sVitaVertexPrefixModeLogged = false;
-	if (!sVitaVertexPrefixModeLogged)
-	{
-		port_log("SSB64: RELOC_FIXUP_MODE vita pass2=vertex-strict texture=lazy\n");
-		sVitaVertexPrefixModeLogged = true;
-	}
-	if (file_id == 52 || file_id == 108 || file_id == 296 || file_id == 313 || file_id == 317)
-	{
-		port_log("SSB64: RELOC_VTX_PREFIX file=%u regions=%u\n",
-		         file_id, (unsigned int)vertex_regions.size());
+		port_log("SSB64: RELOC_FIXUP_MODE vita vertex=typed-hybrid chain-vtx=resource-class texture=lazy\n");
+		sVitaLazyOnlyModeLogged = true;
 	}
 #else
 	// Pass 2: legacy DL-guided fixup scan.  This is intentionally disabled
@@ -1451,7 +1440,7 @@ static int chain_fixup_settimg(void *file_base, size_t file_size,
 	return 1;
 }
 
-static int chain_fixup_vertex(void *file_base, size_t file_size,
+static __attribute__((unused)) int chain_fixup_vertex(void *file_base, size_t file_size,
                                unsigned int slot_byte_off,
                                unsigned int target_byte_off,
                                uint32_t w0)
@@ -1539,6 +1528,92 @@ static int chain_fixup_vertex(void *file_base, size_t file_size,
 	return 1;
 }
 
+/*
+ * High-confidence G_VTX context validation for the reloc-chain pre-fix path.
+ * A candidate must sit inside a short coherent GBI command run before its
+ * target is normalized in-place. This preserves early host-order Vtx for
+ * game-side readers/copies while rejecting struct data that only resembles
+ * a vertex command.
+ */
+/*
+ * Resource-class gate for chain-time vertex normalization. Fighter model
+ * blobs are mixed containers (DObj/MObj descriptors + display lists + Vtx).
+ * Heuristically mutating them in-place can turn a false-positive G_VTX into
+ * persistent model/display-list corruption that survives into the match.
+ *
+ * Fighter models therefore stay immutable and use the typed copy-decode in
+ * GfxSpVertex. Early normalization is reserved for shared geometry banks and
+ * movie geometry that game-side code may inspect/copy before Fast3D dispatch.
+ * This is class-based, never a file-id whitelist.
+ */
+static bool chain_vtx_resource_allows_early_fix(const void *file_base)
+{
+	uintptr_t base = 0;
+	size_t size = 0;
+	unsigned int file_id = 0xFFFFFFFFu;
+	const char *path = nullptr;
+	if (!portRelocDescribePointer(file_base, &base, &size, &file_id, &path) || path == nullptr)
+		return false;
+
+	if (std::strstr(path, "reloc_fighters_main/") != nullptr &&
+	    std::strstr(path, "Model") != nullptr)
+		return false;
+
+	if (std::strstr(path, "reloc_extern_data/ExternDataBank") != nullptr)
+		return true;
+	if (std::strstr(path, "reloc_movies/") != nullptr)
+		return true;
+
+	return false;
+}
+
+static bool chain_vtx_has_dl_context(const uint8_t *file_bytes, size_t file_size,
+                                     unsigned int slot_byte_off)
+{
+	if (file_bytes == nullptr || slot_byte_off < 4) return false;
+	const size_t cmd_off = (size_t)slot_byte_off - 4u;
+	if ((cmd_off & 0x7u) != 0 || cmd_off + 8u > file_size) return false;
+
+	auto plausible_opcode = [](uint8_t op) -> bool {
+		if (op <= 0x08u) return true;
+		if (op >= 0xD3u && op <= 0xDFu) return true;
+		if (op >= 0xE4u) return true;
+		if (op == 0xC0u) return true;
+		return false;
+	};
+
+	auto strong_opcode = [](uint8_t op) -> bool {
+		return op == 0x05u || op == 0x06u || op == 0x07u ||
+		       op == GBI_DL || op == GBI_ENDDL ||
+		       op == GBI_SETTIMG || op == GBI_LOADBLOCK || op == GBI_LOADTLUT ||
+		       op == 0xF5u || op == 0xF2u || op == 0xFCu || op == 0xD9u;
+	};
+
+	unsigned int valid_after = 0;
+	unsigned int strong_after = 0;
+	for (unsigned int i = 1; i <= 6; ++i)
+	{
+		const size_t off = cmd_off + (size_t)i * 8u;
+		if (off + 8u > file_size) break;
+		const uint32_t next_w0 = *reinterpret_cast<const uint32_t *>(file_bytes + off);
+		const uint8_t op = static_cast<uint8_t>(next_w0 >> 24);
+		if (!plausible_opcode(op)) break;
+
+		if (op == GBI_VTX)
+		{
+			if ((next_w0 & 0x00F00000u) != 0 || (next_w0 & 1u) != 0) break;
+			const uint32_t n = (next_w0 >> 12) & 0xFFu;
+			const uint32_t end_idx = (next_w0 & 0xFFEu) >> 1;
+			if (n == 0 || n > 32 || end_idx > 32 || end_idx < n) break;
+		}
+
+		++valid_after;
+		if (strong_opcode(op)) ++strong_after;
+		if (op == GBI_ENDDL) break;
+	}
+	return valid_after >= 2u && strong_after >= 1u;
+}
+
 extern "C" int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
                                               unsigned int slot_byte_off,
                                               unsigned int target_byte_off)
@@ -1599,9 +1674,43 @@ extern "C" int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
 	}
 	if (opcode == GBI_VTX)
 	{
-		// Filter: real packed cmd w1 must be at 8*N+4 alignment.
 		if ((slot_byte_off & 0x7) != 4) return 0;
+
+#if defined(__vita__)
+		// Never mutate mixed fighter-model blobs from chain heuristics. Only
+		// resource classes with a demonstrated pre-Fast3D Vtx consumer may use
+		// the early path; everything else stays typed/lazy.
+		const bool early_class = chain_vtx_resource_allows_early_fix(file_base);
+		const bool safe_context = early_class &&
+		                          chain_vtx_has_dl_context(file_bytes, file_size, slot_byte_off);
+		int file_id = portRelocFindFileIdAndBase(file_base, nullptr);
+		uint32_t num_vtx = (w0 >> 12) & 0xFFu;
+		if (safe_context)
+		{
+			const int fixed = chain_fixup_vertex(file_base, file_size, slot_byte_off,
+			                                     target_byte_off, w0);
+			static unsigned int sSafeVertexTrace = 0;
+			if (sSafeVertexTrace < 128u)
+			{
+				port_log("SSB64: RELOC_VTX_CHAIN_SAFE_APPLY file=%d slot=0x%x target=0x%x n=%u result=%d policy=resource-class\n",
+				         file_id, slot_byte_off, target_byte_off, num_vtx, fixed);
+				++sSafeVertexTrace;
+			}
+			return fixed;
+		}
+
+		static unsigned int sDeferredVertexTrace = 0;
+		if (sDeferredVertexTrace < 128u)
+		{
+			port_log("SSB64: RELOC_VTX_CHAIN_DEFER file=%d slot=0x%x target=0x%x n=%u reason=%s\n",
+			         file_id, slot_byte_off, target_byte_off, num_vtx,
+			         early_class ? "weak-dl-context" : "typed-resource-class");
+			++sDeferredVertexTrace;
+		}
+		return 0;
+#else
 		return chain_fixup_vertex(file_base, file_size, slot_byte_off, target_byte_off, w0);
+#endif
 	}
 	return 0;
 }
@@ -1918,6 +2027,62 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 	portStageAuditNoteRuntimeTex((unsigned int)(fixed_words * 4));
 }
 
+extern "C" int portRelocDecodeVerticesForRuntime(const void *addr, unsigned int num_vtx,
+                                                    void *out_vertices, size_t out_size)
+{
+	if (addr == nullptr || out_vertices == nullptr || num_vtx == 0) return -1;
+
+	uintptr_t fileBase = 0;
+	size_t fileSize = 0;
+	int in_reloc_file = portRelocFindContainingFile(addr, &fileBase, &fileSize);
+	portStageAuditNoteVtxDispatch(in_reloc_file);
+	int rt_file_id = in_reloc_file ? portRelocFindFileIdAndBase(addr, nullptr) : -1;
+	portStageAuditNoteVtxDispatchFile(rt_file_id);
+	if (!in_reloc_file) return 0;
+
+	const uintptr_t target = reinterpret_cast<uintptr_t>(addr);
+	const size_t target_offset = target - fileBase;
+	const size_t total_bytes = (size_t)num_vtx * 16u;
+	if (out_size < total_bytes) return -1;
+	if (target_offset > fileSize || total_bytes > fileSize - target_offset) return -1;
+
+	std::memcpy(out_vertices, addr, total_bytes);
+	uint32_t *region = reinterpret_cast<uint32_t *>(out_vertices);
+	unsigned int decoded_here = 0;
+	unsigned int already_host = 0;
+	for (unsigned int i = 0; i < num_vtx; i++)
+	{
+		const uintptr_t vtx_key = target + (uintptr_t)i * 16u;
+		if (sVertexFixups.count(vtx_key) != 0)
+		{
+			++already_host;
+			continue;
+		}
+		region[i * 4 + 0] = rotate16(region[i * 4 + 0]);
+		region[i * 4 + 1] = rotate16(region[i * 4 + 1]);
+		region[i * 4 + 2] = rotate16(region[i * 4 + 2]);
+		region[i * 4 + 3] = BSWAP32(region[i * 4 + 3]);
+		++decoded_here;
+	}
+	portStageAuditNoteRuntimeVtx(decoded_here);
+
+	if (stage_audit_enabled())
+	{
+		static unsigned int sDecodeTrace = 0;
+		if (sDecodeTrace < 64u)
+		{
+			const int16_t *ob = reinterpret_cast<const int16_t *>(out_vertices);
+			port_log("SSB64: VTX_RUNTIME_DECODE file=%d off=0x%x n=%u decoded=%u prehost=%u post_ob=(%d,%d,%d)\n",
+			         rt_file_id, (unsigned int)target_offset, num_vtx,
+			         decoded_here, already_host,
+			         (int)ob[0], (int)ob[1], (int)ob[2]);
+			++sDecodeTrace;
+		}
+	}
+
+	return 1;
+}
+
 extern "C" void portRelocFixupVertexAtRuntime(const void *addr, unsigned int num_vtx)
 {
 	if (addr == nullptr || num_vtx == 0 || num_vtx > 32) return;
@@ -1983,6 +2148,33 @@ extern "C" void portRelocFixupVertexAtRuntime(const void *addr, unsigned int num
 				         (unsigned int)(size_t)(target - fileBase),
 				         p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
 				         p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+			}
+		}
+	}
+
+	// Post-fix trace for the resources that reproduce the remaining visual bug.
+	// This is intentionally emitted after the per-Vtx idempotent normalization,
+	// so the coordinates reflect exactly what GfxSpVertex will consume.
+	{
+		int rt_file_id = portRelocFindFileIdAndBase(addr, nullptr);
+		if (rt_file_id == 106 || rt_file_id == 108 || rt_file_id == 296 || rt_file_id == 313 || rt_file_id == 317)
+		{
+			static unsigned int sRuntimeTrace106 = 0;
+			static unsigned int sRuntimeTrace108 = 0;
+			static unsigned int sRuntimeTrace296 = 0;
+			static unsigned int sRuntimeTrace313 = 0;
+			static unsigned int sRuntimeTrace317 = 0;
+			unsigned int *trace_count = (rt_file_id == 106) ? &sRuntimeTrace106 :
+			                            (rt_file_id == 108) ? &sRuntimeTrace108 :
+			                            (rt_file_id == 296) ? &sRuntimeTrace296 :
+			                            (rt_file_id == 313) ? &sRuntimeTrace313 : &sRuntimeTrace317;
+			if (*trace_count < 24u)
+			{
+				const int16_t *ob = reinterpret_cast<const int16_t *>(addr);
+				port_log("SSB64: VTX_RUNTIME_FIX file=%d off=0x%x n=%u fixed=%u skipped=%u post_ob=(%d,%d,%d)\n",
+				         rt_file_id, (unsigned int)target_offset, num_vtx, fixed_here, skipped_here,
+				         (int)ob[0], (int)ob[1], (int)ob[2]);
+				++(*trace_count);
 			}
 		}
 	}

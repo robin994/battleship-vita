@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -190,6 +191,69 @@ struct PortRelocForceBatch
 };
 
 static std::vector<PortRelocForceBatch> sPortRelocForceBatches;
+
+#ifdef __vita__
+/*
+ * Generic reloc integrity fallback.
+ *
+ * The raw O2R bytes are immutable, but scene/force heaps are intentionally
+ * recycled.  If the same file/source produces a different post-reloc byte
+ * image on a later load, something in the fixup/cache pipeline leaked state.
+ * Pointer-token words are excluded from the signature because their numeric
+ * generation is allowed to change between loads.
+ */
+struct PortRelocSemanticBaseline
+{
+    unsigned long long source_hash;
+    unsigned long long semantic_hash;
+    size_t size;
+};
+static std::unordered_map<u32, PortRelocSemanticBaseline> sPortRelocSemanticBaselines;
+static int sPortRelocIntegrityRetryDepth = 0;
+
+static unsigned long long portRelocFnv1a64(const void *data, size_t size)
+{
+    const unsigned char *p = static_cast<const unsigned char *>(data);
+    unsigned long long h = 1469598103934665603ULL;
+    for (size_t i = 0; i < size; ++i)
+    {
+        h ^= (unsigned long long)p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static unsigned long long portRelocSemanticHash(const void *data, size_t size,
+                                                 std::vector<unsigned int> slot_offsets)
+{
+    const unsigned char *p = static_cast<const unsigned char *>(data);
+    std::sort(slot_offsets.begin(), slot_offsets.end());
+    slot_offsets.erase(std::unique(slot_offsets.begin(), slot_offsets.end()), slot_offsets.end());
+
+    unsigned long long h = 1469598103934665603ULL;
+    size_t slot_index = 0;
+    for (size_t i = 0; i < size; ++i)
+    {
+        while (slot_index < slot_offsets.size() &&
+               (size_t)slot_offsets[slot_index] + sizeof(u32) <= i)
+        {
+            ++slot_index;
+        }
+
+        bool is_token_byte = false;
+        if (slot_index < slot_offsets.size())
+        {
+            const size_t off = (size_t)slot_offsets[slot_index];
+            is_token_byte = (i >= off && i < off + sizeof(u32));
+        }
+
+        /* Stable marker for each excluded token byte. */
+        h ^= (unsigned long long)(is_token_byte ? 0xA5u : p[i]);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+#endif
 
 static void portStatusBufferEvictRange(LBFileNode *entries, s32 *p_num,
                                        uintptr_t lo, uintptr_t hi);
@@ -747,6 +811,10 @@ extern "C" void portRelocLoadFileFromBytes(
 	const char *table_path = (file_id < RELOC_FILE_COUNT) ? gRelocFileTable[file_id] : nullptr;
 	bool load_ok = true;
 	const char *failure_reason = nullptr;
+	std::vector<unsigned int> reloc_slot_offsets;
+#ifdef __vita__
+	unsigned long long pristine_source_hash = 0;
+#endif
 
 	// CRASH INVESTIGATION (2026-08-21): SceLibKernel data abort, PC inside
 	// this function, fault address=0x6f92a60, immediately after
@@ -814,6 +882,9 @@ extern "C" void portRelocLoadFileFromBytes(
 		         file_id, (unsigned)src_size, bytes_num);
 		copySize = bytes_num;
 	}
+#ifdef __vita__
+	pristine_source_hash = portRelocFnv1a64(src_bytes, copySize);
+#endif
 	if (is_fighter_figatree)
 	{
 		figatree_reloc_words.resize(copySize / sizeof(u32), 0);
@@ -842,7 +913,34 @@ extern "C" void portRelocLoadFileFromBytes(
 	portRelocEvictFileRangesInRange(ram_dst, copySize);
 	port_log("SSB64: RELOC_MEMCPY_GUARD file_id=%u dst=%p src=%p size=%u allocation_size=%u\n",
 	         file_id, ram_dst, src_bytes, (unsigned)copySize, bytes_num);
+#ifdef __vita__
+	bool copy_verified = false;
+	for (unsigned int copy_attempt = 1; copy_attempt <= 3; ++copy_attempt)
+	{
+		memcpy(ram_dst, src_bytes, copySize);
+		const unsigned long long dst_hash = portRelocFnv1a64(ram_dst, copySize);
+		if (dst_hash == pristine_source_hash)
+		{
+			copy_verified = true;
+			if (copy_attempt > 1)
+			{
+				port_log("SSB64: RESOURCE_FALLBACK_COPY_RECOVERED file_id=%u attempt=%u hash=%016llx\n",
+				         file_id, copy_attempt, dst_hash);
+			}
+			break;
+		}
+		port_log("SSB64: RESOURCE_FALLBACK_COPY_MISMATCH file_id=%u attempt=%u expected=%016llx got=%016llx\n",
+		         file_id, copy_attempt, pristine_source_hash, dst_hash);
+	}
+	if (!copy_verified)
+	{
+		port_log("SSB64: RESOURCE_LOAD name=%s size=%u address=%p reloc_count=0 status=FAIL deps=%u reason=copy-integrity\n",
+		         table_path ? table_path : "(mod)", (unsigned)copySize, ram_dst, extern_count);
+		return;
+	}
+#else
 	memcpy(ram_dst, src_bytes, copySize);
+#endif
 
 	/* lbRelocGetExternHeapFile sets sLBRelocExternFileHeap = heap so that
 	 * subsequent dep loads (triggered by the chain walk via
@@ -997,6 +1095,7 @@ extern "C" void portRelocLoadFileFromBytes(
 
 			// Register in the token table and write the 32-bit token
 			u32 token = portRelocRegisterPointer(target);
+			reloc_slot_offsets.push_back((unsigned int)reloc_intern * (unsigned int)sizeof(u32));
 
 			if (is_fighter_figatree && (reloc_intern < figatree_reloc_words.size()))
 			{
@@ -1139,6 +1238,7 @@ extern "C" void portRelocLoadFileFromBytes(
 		// Compute target pointer (offset into the dependency file's data)
 		void *target = (void *)((uintptr_t)vaddr_extern + target_offset);
 		token = portRelocRegisterPointer(target);
+		reloc_slot_offsets.push_back((unsigned int)reloc_extern * (unsigned int)sizeof(u32));
 
 		if (is_fighter_figatree && (reloc_extern < figatree_reloc_words.size()))
 		{
@@ -1198,6 +1298,66 @@ extern "C" void portRelocLoadFileFromBytes(
 		portStageAuditEmitLoadSummary(file_id, table_path, copySize);
 		portStageAuditEmitOpcodeCensus(file_id, table_path, ram_dst, copySize);
 	}
+
+#ifdef __vita__
+	{
+		const unsigned long long semantic_hash = portRelocSemanticHash(ram_dst, copySize, reloc_slot_offsets);
+		auto baseline_it = sPortRelocSemanticBaselines.find(file_id);
+		if (baseline_it == sPortRelocSemanticBaselines.end() ||
+		    baseline_it->second.source_hash != pristine_source_hash ||
+		    baseline_it->second.size != copySize)
+		{
+			sPortRelocSemanticBaselines[file_id] = { pristine_source_hash, semantic_hash, copySize };
+			port_log("SSB64: RESOURCE_INTEGRITY_BASELINE file_id=%u src=%016llx semantic=%016llx size=%u\n",
+			         file_id, pristine_source_hash, semantic_hash, (unsigned)copySize);
+		}
+		else if (baseline_it->second.semantic_hash != semantic_hash)
+		{
+			port_log("SSB64: RESOURCE_INTEGRITY_MISMATCH file_id=%u expected=%016llx got=%016llx retry_depth=%d action=%s\n",
+			         file_id, baseline_it->second.semantic_hash, semantic_hash,
+			         sPortRelocIntegrityRetryDepth,
+			         (sPortRelocIntegrityRetryDepth < 2) ? "pristine-reload" : "accept-after-max-retries");
+
+			if (sPortRelocIntegrityRetryDepth < 2)
+			{
+				/* Fully retract this publication before rebuilding the exact same
+				 * destination from immutable O2R bytes.  This makes the retry a
+				 * true pristine reload rather than another pass over mutated data. */
+				if (loc == nLBFileLocationForce)
+				{
+					portStatusBufferRemoveFile(sLBRelocInternBuffer.force_status_buffer,
+					                           &sLBRelocInternBuffer.force_status_buffer_num,
+					                           file_id, ram_dst);
+				}
+				else
+				{
+					portStatusBufferRemoveFile(sLBRelocInternBuffer.status_buffer,
+					                           &sLBRelocInternBuffer.status_buffer_num,
+					                           file_id, ram_dst);
+				}
+				portPackedDisplayListCacheDeleteRange(ram_dst, copySize);
+				portTextureCacheDeleteRange(ram_dst, copySize);
+				portEvictStructFixupsInRange(ram_dst, copySize);
+				portRelocInvalidateRange(ram_dst, copySize);
+				portRelocEvictFileRangesInRange(ram_dst, copySize);
+
+				++sPortRelocIntegrityRetryDepth;
+				portRelocLoadFileFromBytes(file_id, ram_dst, bytes_num, loc,
+				                           src_bytes, src_size,
+				                           reloc_intern_offset, reloc_extern_offset,
+				                           extern_file_ids, extern_count,
+				                           force_figatree_fixup);
+				--sPortRelocIntegrityRetryDepth;
+				return;
+			}
+		}
+		else if (sPortRelocIntegrityRetryDepth > 0)
+		{
+			port_log("SSB64: RESOURCE_INTEGRITY_RECOVERED file_id=%u semantic=%016llx retry_depth=%d\n",
+			         file_id, semantic_hash, sPortRelocIntegrityRetryDepth);
+		}
+	}
+#endif
 
 	port_log("SSB64: RESOURCE_LOAD name=%s size=%u address=%p reloc_count=%u status=READY deps=%u\n",
 	         table_path ? table_path : "(mod)", (unsigned)copySize, ram_dst,
@@ -1825,11 +1985,32 @@ void lbRelocInitSetup(LBRelocSetup *setup)
 	 * reset here. */
 	gmColScriptsLinkRelocTargets();
 	portResetPackedDisplayListCache();
-	sPortRelocFileRanges.clear();
-	sPortRelocForceBatches.clear();
 
-	// Clear u16 struct fixup tracking — addresses from the old heap are stale
-	portResetStructFixups();
+	/* Do NOT globally clear reloc ranges / force-batch metadata / endian-fixup
+	 * idempotency here.  INTERN-BUFFER resources (fighter model, mainmotion,
+	 * special files, shield pose, etc.) can remain live across scene changes;
+	 * their pointer-table tokens are intentionally preserved for exactly that
+	 * reason.  Clearing the metadata while leaving the bytes alive breaks the
+	 * lifetime invariant in two ways:
+	 *
+	 *   1) explicit struct fixups (MObjSub/Sprite/DObjDesc/...) forget that an
+	 *      already-mutated persistent object is native-endian and can swap it
+	 *      a second time when the next scene reuses that model;
+	 *   2) portRelocFindContainingFile() loses pointer -> file/base/size for
+	 *      persistent buffers, so lazy runtime Vtx/texture fixups cannot fix a
+	 *      sub-range first encountered in a later scene.
+	 *
+	 * Lifetime is already tracked correctly by RANGE: before any recycled
+	 * scene-arena memory is reused, port_taskman_evict_arena_caches() removes
+	 * DL/texture/fixup/file-range state for that exact arena.  Every reloc
+	 * memcpy path also calls portEvictStructFixupsInRange() and
+	 * portRelocEvictFileRangesInRange() before overwriting its destination.
+	 * Therefore range eviction — not scene-wide clearing — is the source of
+	 * truth.  Persistent buffers keep their metadata until their bytes are
+	 * actually overwritten. */
+	port_log("SSB64: RELOC_LIFETIME preserve-persistent ranges=%u force_batches=%u\n",
+	         (unsigned)sPortRelocFileRanges.size(),
+	         (unsigned)sPortRelocForceBatches.size());
 
 	// Clear FB-mirror registrations — see port/bridge/framebuffer_capture.h.
 	// The 1P stage-clear wallpaper buf and the lbtransition photo heap both
