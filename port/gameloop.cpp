@@ -67,6 +67,11 @@ extern "C" int portFastCaptureBackbufferPNG(const char *path);
  * Implemented in port/stubs/n64_stubs.c. */
 extern "C" void port_vi_simulate_vblank(void);
 
+/* Monotonic generation of reloc-backed scene/resource memory.  A raw Gfx*
+ * captured in generation N must never be consumed after the heap advances to
+ * generation N+1, even if the numeric address has been reused. */
+extern "C" unsigned int portRelocGetLifetimeGeneration(void);
+
 extern "C" void lbBackupApplyCheats(void);
 extern "C" uint32_t portSObjTakeFrameBitmapDraws(void);
 extern "C" uint32_t portSObjTakeFrameTexrects(void);
@@ -423,6 +428,9 @@ static int sDLSubmitsThisFrame = 0;
  * DrawAndRunGraphicsCommands. The scheduler doesn't observe the deferral —
  * its task-completion signaling is decoupled from the actual GPU work. */
 static Gfx *sPendingDisplayList = nullptr;
+static unsigned int sPendingDisplayListGeneration = 0u;
+
+extern "C" void port_drain_pending_display_list(void);
 
 /* Simulated scene-setup stall (issue #72). On N64, heavy mid-scene setup
  * (fighter creation + stage init when a montage motion window is built at
@@ -481,10 +489,35 @@ extern "C" void port_submit_display_list(void *dl)
 		return;
 	}
 
-	/* Replace any earlier deferred DL from this frame — only the last one
-	 * matters since they all target the same framebuffer slot. In practice
-	 * SSB64 submits one DL per VI tick. */
+	/* Bind the raw display-list pointer to the exact reloc lifetime in which
+	 * the game built it.  Numeric addresses are routinely reused by the scene
+	 * heap, so pointer value alone is not sufficient provenance. */
+	const unsigned int generation = portRelocGetLifetimeGeneration();
+	if (sPendingDisplayList != nullptr) {
+		port_log("SSB64: GFX_PENDING_REPLACE old=%p old_generation=%u new=%p new_generation=%u\n",
+		         static_cast<void *>(sPendingDisplayList), sPendingDisplayListGeneration,
+		         dl, generation);
+	}
 	sPendingDisplayList = static_cast<Gfx *>(dl);
+	sPendingDisplayListGeneration = generation;
+
+#if defined(__vita__)
+	{
+		static bool sLoggedVitaLifetimeMode = false;
+		if (!sLoggedVitaLifetimeMode) {
+			sLoggedVitaLifetimeMode = true;
+			port_log("SSB64: GFX_LIFETIME_MODE vita=sync-submit generation-guard\n");
+		}
+	}
+	/*
+	 * Vita has no Android/JNI main-thread constraint.  Consume the DL while
+	 * the scheduler/game coroutine that built it still owns every referenced
+	 * reloc resource.  Deferring until PortPushFrame's tail lets a scene
+	 * transition free/reuse those heaps before Fast3D sees the commands.
+	 */
+	gbi_trace_set_vi_frame(sFrameCount + 1);
+	port_drain_pending_display_list();
+#endif
 }
 
 /* Drain any deferred DL on the SDL_main thread. Called from PortPushFrame
@@ -498,10 +531,24 @@ extern "C" void port_drain_pending_display_list(void)
 		return;
 	}
 
+	/* Last-resort lifetime fallback for platforms/paths that still defer.
+	 * Never execute a raw display list after any reloc-backed resource has
+	 * been retired; the next VI will submit a fresh list from the new scene. */
+	const unsigned int current_generation = portRelocGetLifetimeGeneration();
+	if (sPendingDisplayListGeneration != current_generation) {
+		port_log("SSB64: GFX_LIFETIME_FALLBACK_DROP dl=%p submitted_generation=%u current_generation=%u action=drop-stale-dl\n",
+		         static_cast<void *>(sPendingDisplayList),
+		         sPendingDisplayListGeneration, current_generation);
+		sPendingDisplayList = nullptr;
+		sPendingDisplayListGeneration = 0u;
+		return;
+	}
+
 	auto context = Ship::Context::GetInstance();
 	if (!context) {
 		port_log("SSB64: WARNING — no Ship::Context in DL drain\n");
 		sPendingDisplayList = nullptr;
+		sPendingDisplayListGeneration = 0u;
 		return;
 	}
 
@@ -509,11 +556,13 @@ extern "C" void port_drain_pending_display_list(void)
 	if (!window) {
 		port_log("SSB64: WARNING — no Fast3dWindow in DL drain\n");
 		sPendingDisplayList = nullptr;
+		sPendingDisplayListGeneration = 0u;
 		return;
 	}
 
 	Gfx *dl = sPendingDisplayList;
 	sPendingDisplayList = nullptr;
+	sPendingDisplayListGeneration = 0u;
 
 	gbi_trace_begin_frame();
 
@@ -778,8 +827,10 @@ void PortPushFrame(void)
 	}
 #endif
 
-	/* Render the staged display list now that all coroutines have yielded.
-	 * On Android this hop is load-bearing: ImGui's per-frame
+	/* Render any staged display list now that all coroutines have yielded.
+	 * Vita consumes gfx tasks synchronously at submission time so scene
+	 * memory cannot be reclaimed first; this tail drain is normally empty
+	 * there. On Android this hop is load-bearing: ImGui's per-frame
 	 * SDL_GetDisplayUsableBounds Binder-IPCs into Java, and CheckJNI
 	 * rejects jobjects from a port_coroutine fiber. Running on the SDL_main
 	 * thread (here) makes the JNI roundtrip safe. On other platforms the

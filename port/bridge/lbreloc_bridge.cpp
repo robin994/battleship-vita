@@ -15,6 +15,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -184,6 +185,33 @@ struct PortRelocFileRange
 
 static std::vector<PortRelocFileRange> sPortRelocFileRanges;
 
+/*
+ * Monotonic generation for reloc-backed resource lifetime.  Raw display-list
+ * pointers are only valid while the generation in which they were submitted
+ * is still current.  Scene/force heap reuse can put an unrelated resource at
+ * exactly the same address, so address/bounds checks alone cannot detect a
+ * stale pointer.
+ */
+static std::atomic<unsigned int> sPortRelocLifetimeGeneration{1u};
+
+static unsigned int portRelocBumpLifetimeGeneration(const char *reason)
+{
+	const unsigned int generation =
+		sPortRelocLifetimeGeneration.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+#ifdef __vita__
+	port_log("SSB64: RESOURCE_LIFETIME_GENERATION generation=%u reason=%s\n",
+	         generation, reason ? reason : "unknown");
+#else
+	(void)reason;
+#endif
+	return generation;
+}
+
+extern "C" unsigned int portRelocGetLifetimeGeneration(void)
+{
+	return sPortRelocLifetimeGeneration.load(std::memory_order_acquire);
+}
+
 struct PortRelocForceBatch
 {
 	uintptr_t heap_base;
@@ -272,10 +300,12 @@ static void portRelocEvictFileRangesInRange(void *base, size_t size)
 	 * reloc-file pointer in cmd_stack is rejected on next gfx_step (rather
 	 * than dereferencing into now-recycled memory). Done before the erase
 	 * so we still have the base pointers. */
+	bool evicted_any = false;
 	for (const auto &r : sPortRelocFileRanges) {
 		uintptr_t rb = r.base;
 		uintptr_t re = rb + r.size;
 		if ((r.size != 0) && (rb < end) && (begin < re)) {
+			evicted_any = true;
 			port_dl_range_unregister(reinterpret_cast<const void*>(rb));
 			port_log("SSB64: RESOURCE_FREE name=%s address=%p reason=heap-reuse\n",
 			         r.path ? r.path : "(unknown)", reinterpret_cast<void*>(rb));
@@ -291,6 +321,10 @@ static void portRelocEvictFileRangesInRange(void *base, size_t size)
 				return (range.size != 0) && (range_begin < end) && (begin < range_end);
 			}),
 		sPortRelocFileRanges.end());
+
+	if (evicted_any) {
+		portRelocBumpLifetimeGeneration("heap-reuse");
+	}
 }
 
 /* Walk a status-buffer array, drop every entry whose .addr falls inside
@@ -423,6 +457,7 @@ static void portRelocEvictForceBatch(uintptr_t heap_base)
 	const uintptr_t batch_begin = batch_it->heap_base;
 	const uintptr_t batch_end = batch_it->heap_end;
 
+	bool evicted_any = false;
 	for (const auto &range : sPortRelocFileRanges)
 	{
 		uintptr_t range_end = range.base + range.size;
@@ -432,6 +467,7 @@ static void portRelocEvictForceBatch(uintptr_t heap_base)
 			continue;
 		}
 
+		evicted_any = true;
 		void *range_base = reinterpret_cast<void *>(range.base);
 		portPackedDisplayListCacheDeleteRange(range_base, range.size);
 		portTextureCacheDeleteRange(range_base, range.size);
@@ -453,6 +489,9 @@ static void portRelocEvictForceBatch(uintptr_t heap_base)
 				       range.base < batch_end && batch_begin < range_end;
 			}),
 		sPortRelocFileRanges.end());
+	if (evicted_any) {
+		portRelocBumpLifetimeGeneration("force-rewind");
+	}
 	sPortRelocForceBatches.erase(batch_it);
 }
 
@@ -1275,15 +1314,6 @@ extern "C" void portRelocLoadFileFromBytes(
 		return;
 	}
 
-	for (auto it = sPortRelocFileRanges.rbegin(); it != sPortRelocFileRanges.rend(); ++it)
-	{
-		if (it->file_id == file_id && it->base == reinterpret_cast<uintptr_t>(ram_dst))
-		{
-			it->ready = true;
-			break;
-		}
-	}
-
 #ifdef __vita__
 	// Root 3D normalization at a deterministic point: after every relocation
 	// token is live, before any game-side consumer can observe RESOURCE_READY.
@@ -1368,6 +1398,20 @@ extern "C" void portRelocLoadFileFromBytes(
 		}
 	}
 #endif
+
+	/* Publish only after the whole load transaction is complete.  v5 set
+	 * ready before 3D finalization/integrity validation, allowing a re-entrant
+	 * status lookup to observe a partially-finalized resource. */
+	for (auto it = sPortRelocFileRanges.rbegin(); it != sPortRelocFileRanges.rend(); ++it)
+	{
+		if (it->file_id == file_id && it->base == reinterpret_cast<uintptr_t>(ram_dst))
+		{
+			it->ready = true;
+			break;
+		}
+	}
+	port_log("SSB64: RESOURCE_TRANSACTION_COMMIT file_id=%u address=%p state=READY\n",
+	         file_id, ram_dst);
 
 	port_log("SSB64: RESOURCE_LOAD name=%s size=%u address=%p reloc_count=%u status=READY deps=%u\n",
 	         table_path ? table_path : "(mod)", (unsigned)copySize, ram_dst,

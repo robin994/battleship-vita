@@ -1152,7 +1152,7 @@ extern "C" void portRelocByteSwapBlob(void *data, size_t size, unsigned int file
 	static bool sVitaLazyOnlyModeLogged = false;
 	if (!sVitaLazyOnlyModeLogged)
 	{
-		port_log("SSB64: RELOC_FIXUP_MODE vita vertex=post-reloc-manifest chain-vtx=disabled texture=lazy\n");
+		port_log("SSB64: RELOC_FIXUP_MODE vita vertex=post-reloc-manifest-strict chain-vtx=disabled texture=lazy\n");
 		sVitaLazyOnlyModeLogged = true;
 	}
 #else
@@ -1711,10 +1711,11 @@ extern "C" int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
 // This pass runs after intern+extern relocation has completed. Candidate DL
 // roots come only from live relocation tokens. A root is accepted only when it
 // parses as a bounded packed GBI list with valid opcodes and a real terminator.
-// G_DL edges are followed recursively. Only G_VTX targets reached through that
-// validated graph are normalized in-place. This is early enough for game code
-// that copies vertices later, while runtime-built lists still fall back to the
-// non-destructive GfxSpVertex decode path.
+// G_DL edges are followed recursively ONLY while they remain inside the same
+// resource. A finalizer must never mutate an external dependency: dependencies
+// have their own load/finalization transaction. Only owner-local G_VTX targets
+// reached through the validated graph are normalized in-place. Runtime-built
+// lists still fall back to the non-destructive GfxSpVertex decode path.
 
 #if defined(__vita__)
 
@@ -1747,6 +1748,16 @@ static bool manifest_decode_vtx_command(uint32_t w0, unsigned int *out_num_vtx)
 	return true;
 }
 
+static bool manifest_owner_contains(uintptr_t owner_base, size_t owner_size,
+                                    const void *ptr, size_t bytes = 1u)
+{
+	if (ptr == nullptr || owner_size == 0u || bytes == 0u) return false;
+	const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+	if (addr < owner_base) return false;
+	const size_t off = (size_t)(addr - owner_base);
+	return off <= owner_size && bytes <= owner_size - off;
+}
+
 static bool manifest_resolve_resource_pointer(uint32_t raw,
                                               uintptr_t owner_base,
                                               size_t owner_size,
@@ -1768,30 +1779,25 @@ static bool manifest_resolve_resource_pointer(uint32_t raw,
 
 	if (resolved == nullptr) return false;
 
-	uintptr_t target_base = 0;
-	size_t target_size = 0;
-	if (!portRelocFindContainingFile(resolved, &target_base, &target_size))
-		return false;
-
+	/* A resolved token may legitimately point at an external dependency.
+	 * Resolution is allowed here so the parser can classify that edge, but
+	 * ownership is enforced by the caller.  v5 accidentally followed these
+	 * edges and normalized dependency memory after that dependency was READY. */
 	if (out_ptr != nullptr) *out_ptr = resolved;
 	return true;
 }
 
 static bool manifest_validate_vtx_range(void *ptr, unsigned int num_vtx,
+                                        uintptr_t owner_base, size_t owner_size,
                                         ManifestVtxRange *out_range)
 {
 	if (ptr == nullptr || num_vtx == 0 || num_vtx > 32u) return false;
 
-	uintptr_t base = 0;
-	size_t size = 0;
-	if (!portRelocFindContainingFile(ptr, &base, &size)) return false;
-
 	const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-	const size_t off = (size_t)(addr - base);
 	const size_t bytes = (size_t)num_vtx * 16u;
 
 	if ((addr & 0x3u) != 0) return false;
-	if (off > size || bytes > size - off) return false;
+	if (!manifest_owner_contains(owner_base, owner_size, ptr, bytes)) return false;
 
 	if (out_range != nullptr)
 	{
@@ -1806,26 +1812,29 @@ struct ManifestDlResult
 	bool valid = false;
 	std::vector<ManifestVtxRange> vtx_ranges;
 	std::vector<void *> sublists;
+	unsigned int external_vtx_refs = 0;
+	unsigned int external_dl_refs = 0;
 };
 
-static ManifestDlResult manifest_parse_packed_dl(void *candidate)
+static ManifestDlResult manifest_parse_packed_dl(void *candidate,
+                                                  uintptr_t owner_base,
+                                                  size_t owner_size)
 {
 	ManifestDlResult result;
 	if (candidate == nullptr) return result;
 
-	uintptr_t file_base = 0;
-	size_t file_size = 0;
-	if (!portRelocFindContainingFile(candidate, &file_base, &file_size))
+	/* Critical v6 invariant: a resource finalizer may inspect and mutate only
+	 * bytes owned by that exact resource.  Never follow a token into an extern
+	 * dependency merely because it happens to parse as a valid display list. */
+	if (!manifest_owner_contains(owner_base, owner_size, candidate, 8u))
 		return result;
 
 	const uintptr_t start = reinterpret_cast<uintptr_t>(candidate);
-	if (start < file_base) return result;
-
-	const size_t start_off = (size_t)(start - file_base);
-	if ((start_off & 0x7u) != 0 || start_off + 8u > file_size)
+	const size_t start_off = (size_t)(start - owner_base);
+	if ((start_off & 0x7u) != 0 || start_off + 8u > owner_size)
 		return result;
 
-	const size_t max_commands = std::min<size_t>((file_size - start_off) / 8u, 512u);
+	const size_t max_commands = std::min<size_t>((owner_size - start_off) / 8u, 512u);
 	unsigned int meaningful = 0;
 	bool terminated = false;
 	bool saw_graphics = false;
@@ -1849,12 +1858,24 @@ static ManifestDlResult manifest_parse_packed_dl(void *candidate)
 				return ManifestDlResult{};
 
 			void *vtx_ptr = nullptr;
-			if (manifest_resolve_resource_pointer(w1, file_base, file_size, &vtx_ptr))
+			if (manifest_resolve_resource_pointer(w1, owner_base, owner_size, &vtx_ptr))
 			{
-				ManifestVtxRange range{};
-				if (!manifest_validate_vtx_range(vtx_ptr, num_vtx, &range))
-					return ManifestDlResult{};
-				result.vtx_ranges.push_back(range);
+				if (manifest_owner_contains(owner_base, owner_size, vtx_ptr,
+				                            (size_t)num_vtx * 16u))
+				{
+					ManifestVtxRange range{};
+					if (!manifest_validate_vtx_range(vtx_ptr, num_vtx,
+					                                 owner_base, owner_size, &range))
+						return ManifestDlResult{};
+					result.vtx_ranges.push_back(range);
+				}
+				else
+				{
+					/* The dependency owns this Vtx and will normalize it in its own
+					 * finalization transaction. Runtime typed decode remains the
+					 * fallback if that dependency has no discoverable stored DL. */
+					++result.external_vtx_refs;
+				}
 				saw_graphics = true;
 			}
 		}
@@ -1866,8 +1887,13 @@ static ManifestDlResult manifest_parse_packed_dl(void *candidate)
 		{
 			saw_graphics = true;
 			void *sub = nullptr;
-			if (manifest_resolve_resource_pointer(w1, file_base, file_size, &sub))
-				result.sublists.push_back(sub);
+			if (manifest_resolve_resource_pointer(w1, owner_base, owner_size, &sub))
+			{
+				if (manifest_owner_contains(owner_base, owner_size, sub, 8u))
+					result.sublists.push_back(sub);
+				else
+					++result.external_dl_refs;
+			}
 
 			const bool no_push = ((w0 >> 16) & 1u) != 0;
 			if (no_push)
@@ -1888,6 +1914,8 @@ static ManifestDlResult manifest_parse_packed_dl(void *candidate)
 	{
 		result.vtx_ranges.clear();
 		result.sublists.clear();
+		result.external_vtx_refs = 0;
+		result.external_dl_refs = 0;
 	}
 	return result;
 }
@@ -1914,13 +1942,16 @@ extern "C" void portRelocFinalize3DVertexManifest(void *file_base, size_t file_s
 
 		const uint32_t token = *reinterpret_cast<const uint32_t *>(base + slot_off);
 		void *target = token != 0 ? portRelocTryResolvePointer(token) : nullptr;
-		if (target != nullptr) queue.push_back(target);
+		if (target != nullptr && manifest_owner_contains(base, file_size, target, 8u))
+			queue.push_back(target);
 	}
 
 	std::unordered_set<uintptr_t> visited_dl;
 	std::map<uintptr_t, size_t> ranges;
 	unsigned int valid_dls = 0;
 	unsigned int rejected_roots = 0;
+	unsigned int external_vtx_refs = 0;
+	unsigned int external_dl_refs = 0;
 
 	for (size_t q = 0; q < queue.size() && q < 4096u; ++q)
 	{
@@ -1928,7 +1959,7 @@ extern "C" void portRelocFinalize3DVertexManifest(void *file_base, size_t file_s
 		const uintptr_t key = reinterpret_cast<uintptr_t>(candidate);
 		if (!visited_dl.insert(key).second) continue;
 
-		ManifestDlResult parsed = manifest_parse_packed_dl(candidate);
+		ManifestDlResult parsed = manifest_parse_packed_dl(candidate, base, file_size);
 		if (!parsed.valid)
 		{
 			++rejected_roots;
@@ -1936,6 +1967,8 @@ extern "C" void portRelocFinalize3DVertexManifest(void *file_base, size_t file_s
 		}
 
 		++valid_dls;
+		external_vtx_refs += parsed.external_vtx_refs;
+		external_dl_refs += parsed.external_dl_refs;
 		for (const ManifestVtxRange &r : parsed.vtx_ranges)
 		{
 			auto it = ranges.find(r.address);
@@ -1980,9 +2013,11 @@ extern "C" void portRelocFinalize3DVertexManifest(void *file_base, size_t file_s
 	if (valid_dls > 0u || normalized_vertices > 0u)
 	{
 		port_log("SSB64: RESOURCE_3D_MANIFEST file_id=%u roots=%u valid_dls=%u rejected=%u "
-		         "vtx_ranges=%u normalized_vertices=%u prehost_vertices=%u\n",
+		         "vtx_ranges=%u normalized_vertices=%u prehost_vertices=%u "
+		         "external_vtx=%u external_dl=%u ownership=strict\n",
 		         file_id, (unsigned int)reloc_slot_count, valid_dls, rejected_roots,
-		         normalized_ranges, normalized_vertices, already_normalized);
+		         normalized_ranges, normalized_vertices, already_normalized,
+		         external_vtx_refs, external_dl_refs);
 	}
 }
 
