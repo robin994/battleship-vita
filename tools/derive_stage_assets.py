@@ -12,9 +12,9 @@ For each stage in the STAGES manifest this script:
   5. Stitches all bitmap strips into one full RGBA image.
   6. Saves <output_dir>/<name>_background.png  (full resolution, e.g. 300x220).
   7. Saves <output_dir>/<name>_small.png       (48x36 LANCZOS downscale).
-  8. If the stage entry has a "name_text" key: renders a black-on-transparent
-     nameplate PNG at 96x10 (matching the ROM IA4 nameplate sprite dimensions)
-     and saves it as <output_dir>/<name>_name.png.
+  8. If the stage entry has a "name_text" key: synthesizes a 96x10 nameplate
+     from glyphs segmented out of the ROM's own MNMaps stage-name sprites, then
+     saves it as <output_dir>/<name>_name.png.  No host/system font is used.
 
 Usage:
   python3 tools/derive_stage_assets.py <baserom.z64> <output_dir>
@@ -31,7 +31,7 @@ Adding a new stage:
 import struct
 import sys
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 # ---------------------------------------------------------------------------
 # Import the VPK0 decoder and RELOC extractor from the existing debug tool.
@@ -110,6 +110,31 @@ STAGES = [
 # ---------------------------------------------------------------------------
 NAME_W = 96
 NAME_H = 10
+
+# Vanilla Stage Select nameplates live in reloc file 30 (MNMaps).  They are
+# pre-rendered IA4 masks, not a runtime font.  Build a small glyph atlas from
+# these ROM-owned labels so port-only stage names inherit the exact same pixel
+# style instead of Pillow's unrelated default bitmap font.  Labels containing
+# apostrophes are intentionally omitted: the punctuation can form a separate
+# alpha run and complicate deterministic segmentation, while the remaining
+# labels already cover every letter needed by BATTLEFIELD / FINAL DESTINATION
+# and every METAL CAVERN letter except V.
+NAMEPLATE_RELOC_FILE = 30
+NAMEPLATE_SOURCES = [
+    ("SECTOR Z",          0x438),
+    ("CONGO JUNGLE",      0x678),
+    ("PLANET ZEBES",      0x8B8),
+    ("HYRULE CASTLE",     0xB10),
+    ("SAFFRON CITY",      0xF98),
+    ("MUSHROOM KINGDOM", 0x11D8),
+    ("DREAM LAND",       0x1418),
+]
+
+# Vanilla stage labels do not contain V.  Use the ROM's MNCommonFonts V only
+# as a last-resort single-glyph seed for METAL CAVERN; it is resized with
+# nearest-neighbour and thresholded to the same 1-bit alpha mask.
+COMMON_FONTS_RELOC_FILE = 33
+COMMON_FONTS_V_SPRITE_OFF = 0xC10
 
 # CSS thumbnail dimensions — same for all stage icons (matches N64 CSS format).
 ICON_W = 48
@@ -397,53 +422,173 @@ def ia4_to_rgba8888(raw: bytes, width: int, height: int) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Nameplate PNG renderer.
-#
-# Renders <text> as a black-on-transparent 96x10 PNG.  Uses PIL's built-in
-# bitmap font (ImageFont.load_default()), which produces a pixel-art style
-# glyph at a natural size of ~6 pixels tall (fitting comfortably in 10 rows).
-#
-# For "FINAL DESTINATION" the natural text width is 97px; centering clips the
-# rightmost pixel column, which is transparent padding.  The result visually
-# matches the ROM IA4 nameplates (same canvas dimensions, same 1-bit alpha
-# style — the SObj caller forces all color channels to black at draw time).
+# ROM-style nameplate glyph extraction / renderer.
 # ---------------------------------------------------------------------------
 
 
-def render_name_png(text: str, output_path: Path) -> None:
+def decode_ia4_sprite(file_data: bytes, sprite_off: int) -> Image.Image:
+    """Decode a reloc-file IA4 Sprite into an RGBA PIL image."""
+    sp = parse_sprite(file_data, sprite_off)
+    if sp["bmfmt"] != 4 or sp["bmsiz"] != 0:
+        raise ValueError(
+            f"sprite 0x{sprite_off:X}: expected IA4 (fmt=4/siz=0), "
+            f"got fmt={sp['bmfmt']} siz={sp['bmsiz']}"
+        )
+
+    w = sp["width"]
+    h = sp["height"]
+    rows = []
+    for bm in resolve_bitmap_offsets(file_data, sp):
+        strip_w = bm["width"]
+        strip_h = bm["actualHeight"]
+        rendered_rows = min(sp["bmheight"], strip_h)
+        row_stride = (strip_w + 1) // 2
+        raw_bytes = row_stride * strip_h
+        buf_off = bm["buf_off"]
+        if buf_off < 0 or buf_off + raw_bytes > len(file_data):
+            raise ValueError(
+                f"IA4 sprite 0x{sprite_off:X}: bitmap data 0x{buf_off:X}+0x{raw_bytes:X} "
+                f"outside reloc file (0x{len(file_data):X})"
+            )
+        rgba = ia4_to_rgba8888(file_data[buf_off:buf_off + raw_bytes], strip_w, strip_h)
+        row_bytes = strip_w * 4
+        for row in range(rendered_rows):
+            # Nameplate sprites are full-width strips; crop any DMA padding to
+            # the authored Sprite.width before appending the row.
+            rows.append(rgba[row * row_bytes:row * row_bytes + w * 4])
+
+    if len(rows) < h:
+        rows.extend([bytes(w * 4)] * (h - len(rows)))
+    return Image.frombytes("RGBA", (w, h), b"".join(rows[:h]))
+
+
+def _alpha_runs(img: Image.Image) -> list:
+    """Return contiguous x-ranges containing at least one visible pixel."""
+    alpha = img.getchannel("A")
+    runs = []
+    run_start = None
+    for x in range(img.width):
+        occupied = any(alpha.getpixel((x, y)) >= 128 for y in range(img.height))
+        if occupied and run_start is None:
+            run_start = x
+        elif not occupied and run_start is not None:
+            runs.append((run_start, x))
+            run_start = None
+    if run_start is not None:
+        runs.append((run_start, img.width))
+    return runs
+
+
+def _glyph_mask(img: Image.Image, x0: int, x1: int) -> Image.Image:
+    """Crop one glyph run and normalize it to black + 1-bit alpha."""
+    glyph = img.crop((x0, 0, x1, img.height)).convert("RGBA")
+    alpha = glyph.getchannel("A").point(lambda a: 255 if a >= 128 else 0)
+    out = Image.new("RGBA", glyph.size, (0, 0, 0, 0))
+    out.putalpha(alpha)
+    return out
+
+
+def build_rom_nameplate_glyphs(rom: bytes) -> dict:
     """
-    Render text as a black-on-transparent nameplate PNG at NAME_W x NAME_H.
+    Segment vanilla 96x10 MNMaps stage labels into a reusable glyph atlas.
 
-    Font: PIL's built-in bitmap font (no external TTF dependency).  The
-    natural size (8px tall glyphs) fits cleanly in a 10-row canvas with one
-    row of padding at top and bottom.  Anti-aliasing is off by construction
-    (bitmap font), so the output is pure 1-bit alpha — pixel-art style
-    matching the ROM's IA4 nameplates.
+    The segmentation is deliberately strict: each non-space source character
+    must correspond to exactly one contiguous alpha run.  If that invariant
+    ever changes in another ROM revision, fail loudly instead of silently
+    generating a wrong-looking nameplate.
     """
-    font = ImageFont.load_default()
+    file_data = extract_file(rom, NAMEPLATE_RELOC_FILE)
+    atlas = {}
 
-    # Measure on a scratch image (avoid drawing to destination before centering).
-    probe = Image.new("RGBA", (NAME_W * 4, NAME_H * 2), (0, 0, 0, 0))
-    probe_draw = ImageDraw.Draw(probe)
-    bbox = probe_draw.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
+    for text, sprite_off in NAMEPLATE_SOURCES:
+        img = decode_ia4_sprite(file_data, sprite_off)
+        runs = _alpha_runs(img)
+        chars = [c for c in text if c != " "]
+        if len(runs) != len(chars):
+            raise ValueError(
+                f"MNMaps nameplate {text!r} @0x{sprite_off:X}: found {len(runs)} "
+                f"glyph runs, expected {len(chars)}. Refusing host-font fallback."
+            )
+        for ch, (x0, x1) in zip(chars, runs):
+            glyph = _glyph_mask(img, x0, x1)
+            # Prefer the widest sample for repeated letters; it is less likely
+            # to have been tightly kerned/cropped by a neighbouring glyph.
+            if ch not in atlas or glyph.width > atlas[ch].width:
+                atlas[ch] = glyph
 
-    # Center horizontally; place baseline so text is vertically centered.
-    x = (NAME_W - text_w) // 2 - bbox[0]
-    y = (NAME_H - text_h) // 2 - bbox[1]
+    # The vanilla stage names contain no V.  Seed only that missing letter from
+    # the game's own menu font rather than from a host font.
+    if "V" not in atlas:
+        fonts = extract_file(rom, COMMON_FONTS_RELOC_FILE)
+        v = decode_ia4_sprite(fonts, COMMON_FONTS_V_SPRITE_OFF)
+        bbox = v.getchannel("A").getbbox()
+        if bbox is not None:
+            v = _glyph_mask(v, bbox[0], bbox[2])
+            target_h = max(1, NAME_H - 2)
+            if v.height != target_h:
+                target_w = max(1, round(v.width * target_h / v.height))
+                v = v.resize((target_w, target_h), Image.Resampling.NEAREST)
+                canvas = Image.new("RGBA", (target_w, NAME_H), (0, 0, 0, 0))
+                canvas.alpha_composite(v, (0, (NAME_H - target_h) // 2))
+                v = canvas
+            atlas["V"] = v
 
-    # Draw on the real canvas.
+    return atlas
+
+
+def render_name_png(text: str, output_path: Path, glyphs: dict) -> None:
+    """Compose text from ROM-derived stage-name glyphs on a 96x10 canvas."""
+    missing = sorted({ch for ch in text if ch != " " and ch not in glyphs})
+    if missing:
+        raise ValueError(
+            f"Cannot render {text!r}: ROM-style glyph atlas is missing {missing}"
+        )
+
+    # A one-pixel gap reproduces the tight spacing of the pre-rendered stage
+    # labels.  Word spacing is deliberately only three pixels because the 96px
+    # plate is narrow and FINAL DESTINATION is longer than any vanilla label.
+    pieces = []
+    for ch in text:
+        if ch == " ":
+            pieces.append((None, 3))
+        else:
+            pieces.append((glyphs[ch], glyphs[ch].width))
+
+    width = sum(w for _, w in pieces)
+    letter_count = sum(1 for g, _ in pieces if g is not None)
+    width += max(0, letter_count - 1)  # one pixel between adjacent letters
+
+    work = Image.new("RGBA", (max(1, width), NAME_H), (0, 0, 0, 0))
+    x = 0
+    for idx, (glyph, advance) in enumerate(pieces):
+        if glyph is None:
+            x += advance
+            continue
+        y = (NAME_H - glyph.height) // 2
+        work.alpha_composite(glyph, (x, y))
+        x += advance
+        # Add spacing only when another non-space glyph follows eventually.
+        if any(g is not None for g, _ in pieces[idx + 1:]):
+            x += 1
+
+    bbox = work.getchannel("A").getbbox()
+    if bbox is not None:
+        work = work.crop((bbox[0], 0, bbox[2], NAME_H))
+
+    # Long port-only names may exceed the fixed 96px N64 plate.  Preserve the
+    # pixel-art appearance with nearest-neighbour horizontal compression only.
+    max_text_w = NAME_W - 2
+    if work.width > max_text_w:
+        work = work.resize((max_text_w, NAME_H), Image.Resampling.NEAREST)
+
     img = Image.new("RGBA", (NAME_W, NAME_H), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.text((x, y), text, font=font, fill=(0, 0, 0, 255))
+    img.alpha_composite(work, ((NAME_W - work.width) // 2, 0))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(output_path)
-
-    filesize = output_path.stat().st_size
     print(
-        f"[{text}] Saved nameplate: {output_path} ({NAME_W}x{NAME_H}, {filesize} bytes)",
+        f"[{text}] Saved ROM-style nameplate: {output_path} "
+        f"({NAME_W}x{NAME_H}, {output_path.stat().st_size} bytes)",
         file=sys.stderr,
     )
 
@@ -550,7 +695,7 @@ def extract_emblem(stage: dict, rom: bytes, output_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def extract_stage(stage: dict, rom: bytes, output_dir: Path) -> None:
+def extract_stage(stage: dict, rom: bytes, output_dir: Path, nameplate_glyphs: dict) -> None:
     name       = stage["name"]
     reloc_file = stage["reloc_file"]
     sprite_off = stage["sprite_off"]
@@ -667,7 +812,7 @@ def extract_stage(stage: dict, rom: bytes, output_dir: Path) -> None:
     name_text = stage.get("name_text")
     if name_text:
         name_path = output_dir / f"{name}_name.png"
-        render_name_png(name_text, name_path)
+        render_name_png(name_text, name_path, nameplate_glyphs)
 
     # Extract and upscale emblem PNG if the stage has an emblem_src key.
     emblem_src = stage.get("emblem_src")
@@ -703,10 +848,20 @@ def main(argv: list) -> int:
             file=sys.stderr,
         )
 
+    try:
+        nameplate_glyphs = build_rom_nameplate_glyphs(rom)
+        print(
+            "ROM-style CSS glyph atlas: " + "".join(sorted(nameplate_glyphs.keys())),
+            file=sys.stderr,
+        )
+    except Exception as exc:
+        print(f"ERROR building ROM-style stage-name glyph atlas: {exc}", file=sys.stderr)
+        return 1
+
     errors = 0
     for stage in STAGES:
         try:
-            extract_stage(stage, rom, out_dir)
+            extract_stage(stage, rom, out_dir, nameplate_glyphs)
         except Exception as exc:
             print(f"ERROR [{stage['name']}]: {exc}", file=sys.stderr)
             errors += 1

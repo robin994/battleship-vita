@@ -380,9 +380,10 @@ clean: $(OBJS_CLEAN)
 # 10 PNGs are derived from the user's own ROM and must stay off both the repo
 # and the VPK (same "no Nintendo-derived bytes shipped" rule BattleShip.o2r
 # itself follows — see CLAUDE.md's PS Vita Port section). Run this target
-# once locally, then push build/assets/css_icons/*.png to
-# ux0:data/battleship/assets/css_icons/ over the same vitacompanion FTP
-# channel already used to deploy build/eboot.bin — never through vita-pack-vpk.
+# once locally, then either push build/assets/css_icons/*.png directly or run
+# `make -f Makefile.vita css-icons-deploy` to create an archive rooted at
+# ux0/data/battleship/assets/css_icons/.  Never route these bytes through
+# vita-pack-vpk.
 PYTHON3 ?= python3
 SSB64_BASEROM_CSS := $(firstword $(wildcard baserom.us.z64 baserom.us.n64 baserom.us.v64))
 
@@ -393,3 +394,12 @@ else
 	@mkdir -p build/assets/css_icons
 	$(PYTHON3) tools/derive_stage_assets.py $(SSB64_BASEROM_CSS) build/assets/css_icons
 endif
+
+# Produce an FTP-friendly archive with the exact ux0:data path expected by the
+# Vita runtime.  This does not add ROM-derived bytes to battleship.vpk; it is a
+# separate local artifact the user can unzip/copy to the memory card.
+css-icons-deploy: css-icons
+	@rm -rf build/css-icons-vita-deploy build/css-icons-vita-deploy.zip
+	@mkdir -p build/css-icons-vita-deploy/ux0/data/battleship/assets/css_icons
+	@cp build/assets/css_icons/*.png build/css-icons-vita-deploy/ux0/data/battleship/assets/css_icons/
+	$(PYTHON3) -c 'import pathlib, zipfile; root=pathlib.Path("build/css-icons-vita-deploy"); out=pathlib.Path("build/css-icons-vita-deploy.zip"); z=zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED); [z.write(p,p.relative_to(root).as_posix()) for p in root.rglob("*") if p.is_file()]; z.close(); print(f"CSS Vita deploy archive: {out}")'

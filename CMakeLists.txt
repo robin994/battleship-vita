@@ -1250,8 +1250,9 @@ add_custom_target(GenerateBattleShipO2R
 )
 
 # ── CSS stage asset extraction ─────────────────────────────────────────────
-# derive_stage_assets.py extracts the FD background + icon PNGs from the ROM,
-# and synthesizes the FD nameplate PNG (96x10, PIL bitmap font, no ROM data).
+# derive_stage_assets.py extracts the extra-stage background + icon PNGs from
+# the ROM and synthesizes 96x10 nameplates from the ROM's own MNMaps stage-name
+# glyphs (no host/system font, and no pre-derived ROM bytes in the source tree).
 # These PNGs are then copied to the run directory so the game can load them
 # at runtime without any Nintendo-derived bytes baked into the binary.
 #
