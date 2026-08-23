@@ -223,8 +223,10 @@ int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
  * Finalize reloc-backed 3D vertex payloads after intern+extern relocation.
  *
  * Candidate display-list roots come from live relocation slots. Valid packed
- * GBI lists are followed recursively and only their proven G_VTX targets are
- * normalized in-place. Vita uses this before publishing RESOURCE_LOAD READY.
+ * GBI lists are followed recursively to record owner-local G_DL provenance and
+ * audit G_VTX ranges. This resource-level pass is read-only; exact vertex
+ * ranges are normalized later, only after a complete model display-list graph
+ * has passed the typed consumer preflight.
  */
 void portRelocFinalize3DVertexManifest(void *file_base, size_t file_size,
                                       unsigned int file_id,
@@ -232,12 +234,36 @@ void portRelocFinalize3DVertexManifest(void *file_base, size_t file_size,
                                       size_t reloc_slot_count);
 
 /**
- * Lazy vertex fixup at interpreter execute time (Option A).
+ * Return non-zero when ptr was reached as an owner-local G_DL target and the
+ * complete packed list parsed successfully during the resource manifest pass.
+ * This is intentionally narrower than "looks like Gfx": the interpreter uses
+ * it to disambiguate segment 0x0E without treating palette/vertex bytes as a
+ * display list merely because they contain plausible opcode values.
+ */
+int portRelocIsManifestDisplayListTarget(const void *ptr);
+
+/**
+ * Normalize a preflight-proven reloc-backed Vtx range in place.
  *
- * Called from libultraship's gfx_vtx_handler_f3dex2 with the resolved
- * vertex array address and the cmd's num_vtx.  Only data the interpreter
- * actually treats as vertices reaches this function — zero false positives
- * by construction.
+ * This is intentionally separate from the resource manifest: callers may use
+ * it only after a complete consumer display-list graph has validated, so there
+ * is no raw-byte or relocation-slot inference. The operation is per-vertex
+ * idempotent and returns non-zero on success.
+ *
+ * Normalizing before model publication is required because game-side code may
+ * inspect or copy model geometry before Fast3D executes G_VTX. The runtime
+ * copy decoder recognizes these pre-hosted vertices and does not swap them a
+ * second time.
+ */
+int portRelocNormalizeVerticesForTypedConsumer(const void *addr,
+                                                unsigned int num_vtx);
+
+/**
+ * Legacy non-Vita in-place vertex fixup.
+ *
+ * Desktop builds retain this for their historical pass2 path. On Vita this is
+ * intentionally a no-op: portRelocDecodeVerticesForRuntime is the only valid
+ * reloc-backed vertex conversion path.
  *
  * If the address is inside a reloc file, applies the per-Vtx byte
  * permutation (rotate16 for the three s16 pair words, BSWAP32 for the
@@ -255,9 +281,10 @@ void portRelocFixupVertexAtRuntime(const void *addr, unsigned int num_vtx);
 /**
  * Decode reloc-backed Vtx data into a caller-provided host-order buffer.
  *
- * Vita uses this from GfxSpVertex so vertex normalization is type-driven and
- * non-destructive: the reloc blob remains in post-pass1 form, eliminating
- * chain/runtime double-fixups and file-specific exceptions.
+ * Vita uses this from GfxSpVertex as the fallback for ranges not published by
+ * typed model preflight. Preflight-normalized vertices are copied as-is;
+ * remaining reloc-backed vertices are decoded into temporary host-order
+ * storage at each real G_VTX dispatch.
  *
  * Returns 1 when reloc-backed vertices were decoded, 0 when addr is not in a
  * reloc blob (caller should use the original pointer), and -1 on invalid input
@@ -267,7 +294,7 @@ int portRelocDecodeVerticesForRuntime(const void *addr, unsigned int num_vtx,
                                       void *out_vertices, size_t out_size);
 
 /**
- * Lazy texture byte-order fixup at G_LOADBLOCK / G_LOADTLUT execute time.
+ * Legacy in-place texture byte-order fixup at G_LOADBLOCK / G_LOADTLUT time.
  *
  * Called from libultraship's GfxDpLoadBlock / GfxDpLoadTile / GfxDpLoadTlut
  * with the resolved texture address and the texel byte count.  Catches
@@ -286,6 +313,13 @@ int portRelocDecodeVerticesForRuntime(const void *addr, unsigned int num_vtx,
  * @param num_bytes   Texture size in bytes (computed from LOADBLOCK count).
  */
 void portRelocFixupTextureAtRuntime(const void *addr, unsigned int num_bytes);
+
+/**
+ * Return a stable renderer-owned copy of a reloc-backed texture span in its
+ * original N64 byte order. Heap/native pointers are returned unchanged.
+ * Copies are invalidated with their source range before scene-heap reuse.
+ */
+const void *portRelocDecodeTextureForRuntime(const void *addr, unsigned int num_bytes);
 
 /**
  * Texture-fixup diagnostic logging.

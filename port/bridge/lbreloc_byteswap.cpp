@@ -41,6 +41,7 @@ extern "C" int  portRelocFindContainingFile(const void *ptr, uintptr_t *out_base
 extern "C" int  portRelocFindFileIdAndBase(const void *ptr, uintptr_t *out_base);
 extern "C" bool portRelocDescribePointer(const void *ptr, uintptr_t *out_base, size_t *out_size,
                                           unsigned int *out_file_id, const char **out_path);
+extern "C" void portTextureCacheDeleteRange(const void *base, size_t size);
 
 // ============================================================
 //  Stage audit (SSB64_STAGE_AUDIT=1)
@@ -609,6 +610,12 @@ static std::unordered_set<uintptr_t> sStructU16Fixups;
 // struct fixup suppress the first real G_VTX normalization at that address.
 static std::unordered_set<uintptr_t> sVertexFixups;
 
+/* Packed display lists that were reached through an owner-local G_DL edge and
+ * then validated to their natural terminator by the post-reloc manifest.  This
+ * is provenance, not a byte-pattern cache: manifest seed candidates are not
+ * inserted merely because they happen to parse. */
+static std::unordered_set<uintptr_t> sManifestDisplayListTargets;
+
 // Tracks runtime texture bases that own at least one fixed word, plus the
 // largest request size seen from that base. This preserves the old pass2/chain
 // skip behavior for exact-base matches while sTexFixupRanges handles the actual
@@ -628,6 +635,36 @@ static std::unordered_map<uintptr_t, unsigned int> sTexFixupExtent;
 // the same texture, so one O(log N) containment test now replaces thousands of
 // hash lookups; partially-overlapping requests still swap only uncovered gaps.
 static std::map<uintptr_t, uintptr_t> sTexFixupRanges;
+
+/* Stable renderer-owned copies of reloc-backed texture spans. An RDP DMA
+ * read must never byte-swap the mixed source resource in place. */
+using RuntimeTextureDecodeKey = std::pair<uintptr_t, size_t>;
+static std::map<RuntimeTextureDecodeKey, std::vector<uint32_t>> sRuntimeTextureDecodeCache;
+
+static void runtime_texture_decode_cache_evict(uintptr_t begin, uintptr_t end)
+{
+	for (auto it = sRuntimeTextureDecodeCache.begin(); it != sRuntimeTextureDecodeCache.end(); )
+	{
+		const uintptr_t source = it->first.first;
+		if (source >= begin && source < end)
+		{
+			if (!it->second.empty())
+				portTextureCacheDeleteRange(it->second.data(), it->second.size() * sizeof(uint32_t));
+			it = sRuntimeTextureDecodeCache.erase(it);
+		}
+		else ++it;
+	}
+}
+
+static void runtime_texture_decode_cache_clear()
+{
+	for (auto &entry : sRuntimeTextureDecodeCache)
+	{
+		if (!entry.second.empty())
+			portTextureCacheDeleteRange(entry.second.data(), entry.second.size() * sizeof(uint32_t));
+	}
+	sRuntimeTextureDecodeCache.clear();
+}
 
 static void tex_fixup_ranges_insert(uintptr_t begin, uintptr_t end)
 {
@@ -1152,7 +1189,7 @@ extern "C" void portRelocByteSwapBlob(void *data, size_t size, unsigned int file
 	static bool sVitaLazyOnlyModeLogged = false;
 	if (!sVitaLazyOnlyModeLogged)
 	{
-		port_log("SSB64: RELOC_FIXUP_MODE vita vertex=post-reloc-manifest-strict chain-vtx=disabled texture=lazy token_namespace=0x40-0x7F live-command-disambiguation\n");
+		port_log("SSB64: RELOC_FIXUP_MODE vita vertex=typed-preflight-commit+runtime-copy manifest=read-only chain-vtx=disabled texture=runtime-copy-immutable chain-texture=disabled token_namespace=0x40-0x7F live-command-disambiguation\n");
 		sVitaLazyOnlyModeLogged = true;
 	}
 #else
@@ -1211,8 +1248,10 @@ extern "C" void portFixupStructU32(void *base, unsigned int byte_offset, unsigne
 
 extern "C" void portResetStructFixups(void)
 {
+	runtime_texture_decode_cache_clear();
 	sStructU16Fixups.clear();
 	sVertexFixups.clear();
+	sManifestDisplayListTargets.clear();
 	sTexFixupExtent.clear();
 	sTexFixupRanges.clear();
 	sProtectedStructRanges.clear();
@@ -1227,6 +1266,7 @@ extern "C" void portEvictStructFixupsInRange(const void *begin, size_t size)
 
 	uintptr_t lo = reinterpret_cast<uintptr_t>(begin);
 	uintptr_t hi = lo + size;
+	runtime_texture_decode_cache_evict(lo, hi);
 
 	auto evict_set = [&](std::unordered_set<uintptr_t> &s) {
 		for (auto it = s.begin(); it != s.end(); ) {
@@ -1236,6 +1276,7 @@ extern "C" void portEvictStructFixupsInRange(const void *begin, size_t size)
 	};
 	evict_set(sStructU16Fixups);
 	evict_set(sVertexFixups);
+	evict_set(sManifestDisplayListTargets);
 	evict_set(sDeswizzle4cFixups);
 	tex_fixup_ranges_evict(lo, hi);
 	for (auto it = sChainSlotAddrs.lower_bound(lo);
@@ -1278,6 +1319,8 @@ extern "C" void portFixupRawTextureBSWAP32(void *base, size_t bytes)
 	{
 		words[i] = BSWAP32(words[i]);
 	}
+	tex_fixup_ranges_insert(key, key + num_words * sizeof(uint32_t));
+	sTexFixupExtent[key] = (unsigned int)(num_words * sizeof(uint32_t));
 }
 
 // ============================================================
@@ -1529,11 +1572,7 @@ static __attribute__((unused)) int chain_fixup_vertex(void *file_base, size_t fi
 }
 
 /*
- * High-confidence G_VTX context validation for the reloc-chain pre-fix path.
- * A candidate must sit inside a short coherent GBI command run before its
- * target is normalized in-place. This preserves early host-order Vtx for
- * game-side readers/copies while rejecting struct data that only resembles
- * a vertex command.
+ * Legacy G_VTX context validation for non-Vita reloc-chain normalization.
  */
 /*
  * Resource-class gate for chain-time vertex normalization. Fighter model
@@ -1661,8 +1700,14 @@ extern "C" int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
 
 	if (opcode == GBI_SETTIMG)
 	{
+#if defined(__vita__)
+		/* Defer the exact byte span to the real RDP load consumer. */
+		if (stage_audit_enabled()) sStageAudit.chain_settimg_fixups++;
+		return 1;
+#else
 		return chain_fixup_settimg(file_base, file_size, slot_byte_off,
 		                           target_byte_off, w0);
+#endif
 	}
 	if (opcode == GBI_VTX)
 	{
@@ -1670,16 +1715,15 @@ extern "C" int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
 
 #if defined(__vita__)
 		// Never mutate Vtx payloads from a reloc-chain predecessor heuristic.
-		// The chain only establishes pointer provenance. After both relocation
-		// walks finish, portRelocFinalize3DVertexManifest() follows live tokens
-		// into validated packed display lists and normalizes only real G_VTX
-		// targets before the resource is published.
+		// The chain only establishes pointer provenance. The post-reloc manifest
+		// is read-only, and GfxSpVertex decodes only actually dispatched G_VTX
+		// targets into temporary host-order storage.
 		int file_id = portRelocFindFileIdAndBase(file_base, nullptr);
 		uint32_t num_vtx = (w0 >> 12) & 0xFFu;
 		static unsigned int sDeferredVertexTrace = 0;
 		if (sDeferredVertexTrace < 64u)
 		{
-			port_log("SSB64: RELOC_VTX_CHAIN_DEFER file=%d slot=0x%x target=0x%x n=%u reason=post-reloc-manifest\n",
+			port_log("SSB64: RELOC_VTX_CHAIN_DEFER file=%d slot=0x%x target=0x%x n=%u reason=runtime-copy-immutable\n",
 			         file_id, slot_byte_off, target_byte_off, num_vtx);
 			++sDeferredVertexTrace;
 		}
@@ -1697,17 +1741,20 @@ extern "C" int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
 // ============================================================
 //
 // Vtx payloads are not type-safe under the blanket u32 endian pass. The old
-// Vita chain fix guessed their type from the word before a relocation slot,
-// making normalization dependent on chain order and nearby token values.
+// Vita paths guessed their type from relocation slots or plausible command
+// bytes and then mutated the resource in-place. Reloc files are mixed binary
+// containers, so even a bounded, terminating command-shaped byte sequence is
+// not sufficient proof that its G_VTX operands own vertex payloads.
 //
 // This pass runs after intern+extern relocation has completed. Candidate DL
 // roots come only from live relocation tokens. A root is accepted only when it
 // parses as a bounded packed GBI list with valid opcodes and a real terminator.
 // G_DL edges are followed recursively ONLY while they remain inside the same
 // resource. A finalizer must never mutate an external dependency: dependencies
-// have their own load/finalization transaction. Only owner-local G_VTX targets
-// reached through the validated graph are normalized in-place. Runtime-built
-// lists still fall back to the non-destructive GfxSpVertex decode path.
+// have their own load/finalization transaction. The manifest is read-only: it
+// records owner-local G_DL provenance for segment-0E disambiguation and audits
+// G_VTX ranges, but vertex conversion happens exclusively in GfxSpVertex after
+// the running interpreter has dispatched a real G_VTX command.
 
 #if defined(__vita__)
 
@@ -1719,10 +1766,67 @@ struct ManifestVtxRange
 
 static bool manifest_opcode_plausible(uint8_t op)
 {
-	if (op <= 0x0Fu) return true;
-	if (op >= 0xD3u) return true;
-	if (op == 0xC0u) return true;
-	return false;
+	/* Keep this identical to the packed-resource opcode contract enforced by
+	 * Fast3D's portPackedOpcodePlausible(). Broad ranges such as 0x00..0x0F
+	 * accept reserved opcodes in vertex/texture data and manufacture false DL
+	 * graphs. Only commands implemented for SSB64 packed resources belong here. */
+	switch (op)
+	{
+	case 0x00u: // G_NOOP
+	case 0x01u: // G_VTX
+	case 0x02u: // G_MODIFYVTX
+	case 0x03u: // G_CULLDL
+	case 0x05u: // G_TRI1
+	case 0x06u: // G_TRI2
+	case 0x07u: // G_QUAD
+	case 0x09u: // mixed S2DEX G_BG_1CYC
+	case 0x0Au: // mixed S2DEX G_BG_COPY
+	case 0x45u: // RDP_G_SETTILESIZE_INTERP
+	case 0x46u: // RDP_G_SETTARGETINTERPINDEX
+	case 0xC0u: // RDP NOOP
+	case 0xD5u: // G_SPECIAL_1
+	case 0xD7u: // G_TEXTURE
+	case 0xD8u: // G_POPMTX
+	case 0xD9u: // G_GEOMETRYMODE
+	case 0xDAu: // G_MTX
+	case 0xDBu: // G_MOVEWORD
+	case 0xDCu: // G_MOVEMEM
+	case 0xDDu: // G_LOAD_UCODE
+	case 0xDEu: // G_DL
+	case 0xDFu: // G_ENDDL
+	case 0xE0u: // G_SPNOOP
+	case 0xE1u: // RDPHALF_1
+	case 0xE2u: // SETOTHERMODE_L
+	case 0xE3u: // SETOTHERMODE_H
+	case 0xE4u: // TEXRECT
+	case 0xE5u: // TEXRECTFLIP
+	case 0xE6u: // RDPLOADSYNC
+	case 0xE7u: // RDPPIPESYNC
+	case 0xE8u: // RDPTILESYNC
+	case 0xE9u: // RDPFULLSYNC
+	case 0xECu: // SETCONVERT
+	case 0xEDu: // SETSCISSOR
+	case 0xEEu: // SETPRIMDEPTH
+	case 0xEFu: // RDPSETOTHERMODE
+	case 0xF0u: // LOADTLUT
+	case 0xF2u: // SETTILESIZE
+	case 0xF3u: // LOADBLOCK
+	case 0xF4u: // LOADTILE
+	case 0xF5u: // SETTILE
+	case 0xF6u: // FILLRECT
+	case 0xF7u: // SETFILLCOLOR
+	case 0xF8u: // SETFOGCOLOR
+	case 0xF9u: // SETBLENDCOLOR
+	case 0xFAu: // SETPRIMCOLOR
+	case 0xFBu: // SETENVCOLOR
+	case 0xFCu: // SETCOMBINE
+	case 0xFDu: // SETTIMG
+	case 0xFEu: // SETZIMG
+	case 0xFFu: // SETCIMG
+		return true;
+	default:
+		return false;
+	}
 }
 
 static bool manifest_decode_vtx_command(uint32_t w0, unsigned int *out_num_vtx)
@@ -1813,6 +1917,12 @@ struct ManifestDlResult
 	unsigned int external_vtx_refs = 0;
 	unsigned int external_dl_refs = 0;
 };
+
+extern "C" int portRelocIsManifestDisplayListTarget(const void *ptr)
+{
+	if (ptr == nullptr) return 0;
+	return sManifestDisplayListTargets.count(reinterpret_cast<uintptr_t>(ptr)) != 0 ? 1 : 0;
+}
 
 static ManifestDlResult manifest_parse_packed_dl(void *candidate,
                                                   uintptr_t owner_base,
@@ -1937,7 +2047,12 @@ extern "C" void portRelocFinalize3DVertexManifest(void *file_base, size_t file_s
 		return;
 
 	const uintptr_t base = reinterpret_cast<uintptr_t>(file_base);
-	std::vector<void *> queue;
+	struct ManifestQueueEntry
+	{
+		void *candidate;
+		bool from_dl_edge;
+	};
+	std::vector<ManifestQueueEntry> queue;
 	queue.reserve(reloc_slot_count + 16u);
 
 	extern void *portRelocTryResolvePointer(uint32_t token);
@@ -1950,21 +2065,34 @@ extern "C" void portRelocFinalize3DVertexManifest(void *file_base, size_t file_s
 		const uint32_t token = *reinterpret_cast<const uint32_t *>(base + slot_off);
 		void *target = token != 0 ? portRelocTryResolvePointer(token) : nullptr;
 		if (target != nullptr && manifest_owner_contains(base, file_size, target, 8u))
-			queue.push_back(target);
+			queue.push_back({target, false});
 	}
 
 	std::unordered_set<uintptr_t> visited_dl;
+	std::unordered_set<uintptr_t> validated_dl;
 	std::map<uintptr_t, size_t> ranges;
 	unsigned int valid_dls = 0;
+	unsigned int typed_dl_targets = 0;
 	unsigned int rejected_roots = 0;
 	unsigned int external_vtx_refs = 0;
 	unsigned int external_dl_refs = 0;
 
 	for (size_t q = 0; q < queue.size() && q < 4096u; ++q)
 	{
-		void *candidate = queue[q];
+		void *candidate = queue[q].candidate;
 		const uintptr_t key = reinterpret_cast<uintptr_t>(candidate);
-		if (!visited_dl.insert(key).second) continue;
+		if (!visited_dl.insert(key).second)
+		{
+			/* Relocation targets are queued before graph edges are known.  If an
+			 * address was already validated as an untyped seed and a later parent
+			 * reaches it through G_DL, upgrade it to typed provenance. */
+			if (queue[q].from_dl_edge && validated_dl.count(key) != 0)
+			{
+				if (sManifestDisplayListTargets.insert(key).second)
+					++typed_dl_targets;
+			}
+			continue;
+		}
 
 		ManifestDlResult parsed = manifest_parse_packed_dl(candidate, base, file_size);
 		if (!parsed.valid)
@@ -1974,6 +2102,12 @@ extern "C" void portRelocFinalize3DVertexManifest(void *file_base, size_t file_s
 		}
 
 		++valid_dls;
+		validated_dl.insert(key);
+		if (queue[q].from_dl_edge)
+		{
+			if (sManifestDisplayListTargets.insert(key).second)
+				++typed_dl_targets;
+		}
 		external_vtx_refs += parsed.external_vtx_refs;
 		external_dl_refs += parsed.external_dl_refs;
 		for (const ManifestVtxRange &r : parsed.vtx_ranges)
@@ -1983,47 +2117,28 @@ extern "C" void portRelocFinalize3DVertexManifest(void *file_base, size_t file_s
 				ranges[r.address] = r.bytes;
 		}
 		for (void *sub : parsed.sublists)
-			if (sub != nullptr) queue.push_back(sub);
+			if (sub != nullptr) queue.push_back({sub, true});
 	}
 
-	unsigned int normalized_ranges = 0;
-	unsigned int normalized_vertices = 0;
-	unsigned int already_normalized = 0;
-
+	unsigned int validated_vertices = 0;
+	std::unordered_set<uintptr_t> unique_vertices;
 	for (const auto &entry : ranges)
 	{
 		const uintptr_t addr = entry.first;
 		const size_t bytes = entry.second;
 		if ((bytes % 16u) != 0) continue;
-
-		uint32_t *region = reinterpret_cast<uint32_t *>(addr);
-		const size_t count = bytes / 16u;
-		for (size_t i = 0; i < count; ++i)
-		{
-			const uintptr_t vtx_key = addr + i * 16u;
-			if (sVertexFixups.count(vtx_key) != 0)
-			{
-				++already_normalized;
-				continue;
-			}
-
-			sVertexFixups.insert(vtx_key);
-			region[i * 4u + 0u] = rotate16(region[i * 4u + 0u]);
-			region[i * 4u + 1u] = rotate16(region[i * 4u + 1u]);
-			region[i * 4u + 2u] = rotate16(region[i * 4u + 2u]);
-			region[i * 4u + 3u] = BSWAP32(region[i * 4u + 3u]);
-			++normalized_vertices;
-		}
-		++normalized_ranges;
+		for (size_t i = 0; i < bytes / 16u; ++i)
+			unique_vertices.insert(addr + i * 16u);
 	}
+	validated_vertices = (unsigned int)unique_vertices.size();
 
-	if (valid_dls > 0u || normalized_vertices > 0u)
+	if (valid_dls > 0u)
 	{
-		port_log("SSB64: RESOURCE_3D_MANIFEST file_id=%u roots=%u valid_dls=%u rejected=%u "
-		         "vtx_ranges=%u normalized_vertices=%u prehost_vertices=%u "
-		         "external_vtx=%u external_dl=%u ownership=strict\n",
-		         file_id, (unsigned int)reloc_slot_count, valid_dls, rejected_roots,
-		         normalized_ranges, normalized_vertices, already_normalized,
+		port_log("SSB64: RESOURCE_3D_MANIFEST file_id=%u roots=%u valid_dls=%u typed_dl_targets=%u rejected=%u "
+		         "vtx_ranges=%u validated_vertices=%u source_mutations=0 "
+		         "external_vtx=%u external_dl=%u ownership=strict vertex_decode=runtime-copy\n",
+		         file_id, (unsigned int)reloc_slot_count, valid_dls, typed_dl_targets, rejected_roots,
+		         (unsigned int)ranges.size(), validated_vertices,
 		         external_vtx_refs, external_dl_refs);
 	}
 }
@@ -2033,6 +2148,11 @@ extern "C" void portRelocFinalize3DVertexManifest(void *file_base, size_t file_s
 extern "C" void portRelocFinalize3DVertexManifest(void *, size_t, unsigned int,
                                                    const unsigned int *, size_t)
 {
+}
+
+extern "C" int portRelocIsManifestDisplayListTarget(const void *)
+{
+	return 0;
 }
 
 #endif
@@ -2073,6 +2193,13 @@ extern "C" void portRelocFinalize3DVertexManifest(void *, size_t, unsigned int,
 // starts cannot undo each other.
 extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int num_bytes)
 {
+#if defined(__vita__)
+	/* Retained for ABI compatibility. Vita converts into an immutable runtime
+	 * copy in portRelocDecodeTextureForRuntime(). */
+	(void)addr;
+	(void)num_bytes;
+	return;
+#else
 	if (addr == nullptr || num_bytes == 0) return;
 
 	// Only fix data that lives inside a reloc file blob.  Heap-built textures
@@ -2347,6 +2474,70 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 	}
 
 	portStageAuditNoteRuntimeTex((unsigned int)(fixed_words * 4));
+#endif
+}
+
+extern "C" const void *portRelocDecodeTextureForRuntime(const void *addr, unsigned int num_bytes)
+{
+#if !defined(__vita__)
+	(void)num_bytes;
+	return addr;
+#else
+	if (addr == nullptr || num_bytes == 0)
+		return addr;
+
+	uintptr_t file_base = 0;
+	size_t file_size = 0;
+	if (!portRelocFindContainingFile(addr, &file_base, &file_size))
+		return addr;
+
+	const uintptr_t source = reinterpret_cast<uintptr_t>(addr);
+	const size_t source_offset = source - file_base;
+	if (source_offset >= file_size)
+		return nullptr;
+
+	const size_t requested = (static_cast<size_t>(num_bytes) + 3u) & ~size_t{3};
+	if (requested == 0 || requested > (16u * 1024u * 1024u))
+		return nullptr;
+
+	const RuntimeTextureDecodeKey key{source, requested};
+	auto found = sRuntimeTextureDecodeCache.find(key);
+	if (found != sRuntimeTextureDecodeCache.end())
+		return found->second.data();
+
+	std::vector<uint32_t> decoded(requested / sizeof(uint32_t), 0u);
+	const size_t available = std::min(requested, file_size - source_offset);
+	const size_t copied_words = available / sizeof(uint32_t);
+	if (copied_words != 0)
+		std::memcpy(decoded.data(), addr, copied_words * sizeof(uint32_t));
+
+	for (size_t i = 0; i < copied_words; ++i)
+	{
+		const uintptr_t word_source = source + i * sizeof(uint32_t);
+		if (!tex_fixup_ranges_contains(word_source, word_source + sizeof(uint32_t)))
+			decoded[i] = BSWAP32(decoded[i]);
+	}
+
+	auto inserted = sRuntimeTextureDecodeCache.emplace(key, std::move(decoded));
+	portStageAuditNoteTexDispatchFile(portRelocFindFileIdAndBase(addr, nullptr));
+	portStageAuditNoteRuntimeTex((unsigned int)(copied_words * sizeof(uint32_t)));
+
+	static unsigned int sDecodeTrace = 0;
+	if (sDecodeTrace < 96u)
+	{
+		uintptr_t desc_base = 0;
+		size_t desc_size = 0;
+		unsigned int file_id = 0xFFFFFFFFu;
+		const char *path = nullptr;
+		portRelocDescribePointer(addr, &desc_base, &desc_size, &file_id, &path);
+		port_log("SSB64: TEX_RUNTIME_DECODE file=%u off=0x%x requested=0x%x copied=0x%x source=immutable path=%s\n",
+		         file_id, (unsigned int)source_offset, (unsigned int)requested,
+		         (unsigned int)(copied_words * sizeof(uint32_t)), path ? path : "(unknown)");
+		++sDecodeTrace;
+	}
+
+	return inserted.first->second.data();
+#endif
 }
 
 extern "C" int portRelocDecodeVerticesForRuntime(const void *addr, unsigned int num_vtx,
@@ -2405,8 +2596,79 @@ extern "C" int portRelocDecodeVerticesForRuntime(const void *addr, unsigned int 
 	return 1;
 }
 
+extern "C" int portRelocNormalizeVerticesForTypedConsumer(const void *addr,
+                                                             unsigned int num_vtx)
+{
+#if !defined(__vita__)
+	(void)addr;
+	(void)num_vtx;
+	return 1;
+#else
+	if (addr == nullptr || num_vtx == 0 || num_vtx > 32u)
+		return 0;
+
+	uintptr_t file_base = 0;
+	size_t file_size = 0;
+	if (!portRelocFindContainingFile(addr, &file_base, &file_size))
+		return 0;
+
+	const uintptr_t target = reinterpret_cast<uintptr_t>(addr);
+	if (target < file_base)
+		return 0;
+	const size_t target_offset = (size_t)(target - file_base);
+	const size_t total_bytes = (size_t)num_vtx * 16u;
+	if ((target & 3u) != 0u || target_offset > file_size ||
+	    total_bytes > file_size - target_offset)
+		return 0;
+
+	uint32_t *region = reinterpret_cast<uint32_t *>(const_cast<void *>(addr));
+	unsigned int normalized = 0;
+	unsigned int prehost = 0;
+	for (unsigned int i = 0; i < num_vtx; ++i)
+	{
+		const uintptr_t vtx_key = target + (uintptr_t)i * 16u;
+		if (sVertexFixups.count(vtx_key) != 0)
+		{
+			++prehost;
+			continue;
+		}
+
+		sVertexFixups.insert(vtx_key);
+		region[i * 4u + 0u] = rotate16(region[i * 4u + 0u]);
+		region[i * 4u + 1u] = rotate16(region[i * 4u + 1u]);
+		region[i * 4u + 2u] = rotate16(region[i * 4u + 2u]);
+		region[i * 4u + 3u] = BSWAP32(region[i * 4u + 3u]);
+		++normalized;
+	}
+
+	if (normalized != 0)
+		portStageAuditNoteRuntimeVtx(normalized);
+
+	if (stage_audit_enabled() && normalized != 0)
+	{
+		static unsigned int sTypedPreflightTrace = 0;
+		if (sTypedPreflightTrace < 128u)
+		{
+			const int file_id = portRelocFindFileIdAndBase(addr, nullptr);
+			port_log("SSB64: VTX_TYPED_PREFLIGHT_COMMIT file=%d off=0x%x n=%u normalized=%u prehost=%u\n",
+			         file_id, (unsigned int)target_offset, num_vtx, normalized, prehost);
+			++sTypedPreflightTrace;
+		}
+	}
+
+	return 1;
+#endif
+}
+
 extern "C" void portRelocFixupVertexAtRuntime(const void *addr, unsigned int num_vtx)
 {
+#if defined(__vita__)
+	/* Vita keeps reloc resources immutable and decodes only into the temporary
+	 * GfxSpVertex copy. Retain the ABI but forbid hidden in-place endian state. */
+	(void)addr;
+	(void)num_vtx;
+	return;
+#else
 	if (addr == nullptr || num_vtx == 0 || num_vtx > 32) return;
 
 	// Only fix data that lives inside a reloc file blob.  Heap-built vertex
@@ -2500,6 +2762,7 @@ extern "C" void portRelocFixupVertexAtRuntime(const void *addr, unsigned int num
 			}
 		}
 	}
+#endif
 }
 
 // ============================================================
@@ -2730,9 +2993,11 @@ extern "C" void portFixupSpriteBitmapData(void *sprite_v, void *bitmaps_v)
 			size_t num_words = tex_bytes / 4;
 
 			// Undo pass1 BSWAP32 to restore N64 BE byte order.
-			for (size_t j = 0; j < num_words; j++)
-				words[j] = BSWAP32(words[j]);
-		}
+				for (size_t j = 0; j < num_words; j++)
+					words[j] = BSWAP32(words[j]);
+				tex_fixup_ranges_insert(key, key + tex_bytes);
+				sTexFixupExtent[key] = (unsigned int)tex_bytes;
+			}
 
 		if (!bswap_already_done && (tex_log_enabled() || tex_dump_enabled())) {
 			size_t log_tex_bytes = (static_cast<size_t>(width_img) *
