@@ -588,9 +588,10 @@ static void reregisterEntry(const CacheEntry &e) {
 // so every byte logged here is provably identical to what stb_image decodes
 // — no second, invisible read, no doubt about which bytes actually failed.
 //
-// Logs: full path, on-disk size (from a real stat, not our read), bytes
-// actually read, first 16 bytes hex, whether the PNG signature matches, and
-// a CRC32 of the read buffer. Compare that CRC32 against the same file's
+// Logs: full path, advisory stat size, bytes actually read, first 16 bytes
+// hex, whether the PNG signature matches, and a CRC32 of the read buffer.
+// On Vita the descriptor read is authoritative: st_size is diagnostic only.
+// Compare that CRC32 against the same file's
 // bytes on the host (`python3 -c "import zlib;
 // print(hex(zlib.crc32(open('<path>','rb').read())))"`) to tell apart:
 //   A) bytes on Vita differ from what was deployed  -> CRC32 mismatch, sig_ok
@@ -604,8 +605,8 @@ static void reregisterEntry(const CacheEntry &e) {
 //      not matching the one logged at read time (see the second CRC32 in
 //      PNG_DIAG_FAIL); anything else has no way to explain a mismatch there
 //      since it's the exact pointer stb_image is handed.
-// No retries: any failure here returns nullptr exactly once, unchanged from
-// the pre-instrumentation behaviour.
+// Vita reads are streamed until EOF and tolerate short reads. There is no
+// second file open/decode path: stb_image consumes this exact byte buffer.
 // ---------------------------------------------------------------------------
 
 static uint32_t crc32OfBytes(const uint8_t *data, size_t len) {
@@ -621,50 +622,95 @@ static uint32_t crc32OfBytes(const uint8_t *data, size_t len) {
 }
 
 static uint8_t *readWholeFileDiag(const std::string &path, size_t *out_size) {
+#ifdef __vita__
+    static bool sStreamIoModeLogged = false;
+    if (!sStreamIoModeLogged) {
+        port_log("CSS stage assets: PNG_IO_MODE vita=fd-stream-until-eof stat=advisory\n");
+        sStreamIoModeLogged = true;
+    }
+#endif
     *out_size = 0;
     long long fs_size = -1;
     uint8_t *buf = nullptr;
     size_t nread = 0;
 
 #ifdef __vita__
+    /* v10: do not trust sceIoGetstat(st_size) as the authority for these
+     * small UX0 assets. Real-hardware traces showed getstat succeeding while
+     * returning st_size=0 for assets that still need to be attempted. Avoid
+     * lseek entirely on Vita (the port has prior real-firmware lseek faults):
+     * open once and stream sceIoRead() until EOF. Short reads are valid. */
     SceIoStat stat;
     std::memset(&stat, 0, sizeof(stat));
     int statRc = sceIoGetstat(path.c_str(), &stat);
-    if (statRc < 0) {
-        port_log("CSS stage assets: PNG_DIAG path=%s stat_rc=0x%08X (getstat failed)\n",
-                 path.c_str(), (unsigned int)statRc);
-        return nullptr;
+    if (statRc >= 0) {
+        fs_size = (long long)stat.st_size;
     }
-    fs_size = (long long)stat.st_size;
 
     SceUID fd = sceIoOpen(path.c_str(), SCE_O_RDONLY, 0);
     if (fd < 0) {
-        port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld open_rc=0x%08X (open failed)\n",
-                 path.c_str(), fs_size, (unsigned int)fd);
+        port_log("CSS stage assets: PNG_DIAG path=%s stat_rc=0x%08X fs_size=%lld open_rc=0x%08X (open failed)\n",
+                 path.c_str(), (unsigned int)statRc, fs_size, (unsigned int)fd);
         return nullptr;
     }
-    if (fs_size <= 0) {
-        port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld (zero/negative size)\n",
-                 path.c_str(), fs_size);
-        sceIoClose(fd);
-        return nullptr;
+
+    size_t capacity = 4096u;
+    if (fs_size > 0 && (uint64_t)fs_size <= (uint64_t)SIZE_MAX) {
+        capacity = (size_t)fs_size;
     }
-    buf = static_cast<uint8_t *>(std::malloc((size_t)fs_size));
+    if (capacity < 4096u) capacity = 4096u;
+
+    buf = static_cast<uint8_t *>(std::malloc(capacity));
     if (!buf) {
-        port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld (malloc failed)\n",
-                 path.c_str(), fs_size);
+        port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld (malloc failed cap=%u)\n",
+                 path.c_str(), fs_size, (unsigned int)capacity);
         sceIoClose(fd);
         return nullptr;
     }
-    int readRc = sceIoRead(fd, buf, (SceSize)fs_size);
+
+    for (;;) {
+        if (nread == capacity) {
+            if (capacity > (SIZE_MAX / 2u)) {
+                port_log("CSS stage assets: PNG_DIAG path=%s (size overflow while streaming)\n",
+                         path.c_str());
+                std::free(buf);
+                sceIoClose(fd);
+                return nullptr;
+            }
+            const size_t new_capacity = capacity * 2u;
+            void *grown = std::realloc(buf, new_capacity);
+            if (!grown) {
+                port_log("CSS stage assets: PNG_DIAG path=%s (realloc failed %u->%u)\n",
+                         path.c_str(), (unsigned int)capacity, (unsigned int)new_capacity);
+                std::free(buf);
+                sceIoClose(fd);
+                return nullptr;
+            }
+            buf = static_cast<uint8_t *>(grown);
+            capacity = new_capacity;
+        }
+
+        const size_t room = capacity - nread;
+        const SceSize request = (SceSize)((room > 0x10000u) ? 0x10000u : room);
+        int readRc = sceIoRead(fd, buf + nread, request);
+        if (readRc < 0) {
+            port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld read_bytes=%u read_rc=0x%08X (read failed)\n",
+                     path.c_str(), fs_size, (unsigned int)nread, (unsigned int)readRc);
+            std::free(buf);
+            sceIoClose(fd);
+            return nullptr;
+        }
+        if (readRc == 0) break;
+        nread += (size_t)readRc;
+    }
     sceIoClose(fd);
-    if (readRc < 0) {
-        port_log("CSS stage assets: PNG_DIAG path=%s fs_size=%lld read_rc=0x%08X (read failed)\n",
-                 path.c_str(), fs_size, (unsigned int)readRc);
+
+    if (nread == 0) {
+        port_log("CSS stage assets: PNG_DIAG path=%s stat_rc=0x%08X fs_size=%lld read_bytes=0 (empty)\n",
+                 path.c_str(), (unsigned int)statRc, fs_size);
         std::free(buf);
         return nullptr;
     }
-    nread = (size_t)readRc;
 #else
     FILE *f = fopen(path.c_str(), "rb");
     if (!f) {

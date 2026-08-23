@@ -1152,7 +1152,7 @@ extern "C" void portRelocByteSwapBlob(void *data, size_t size, unsigned int file
 	static bool sVitaLazyOnlyModeLogged = false;
 	if (!sVitaLazyOnlyModeLogged)
 	{
-		port_log("SSB64: RELOC_FIXUP_MODE vita vertex=post-reloc-manifest-strict chain-vtx=disabled texture=lazy\n");
+		port_log("SSB64: RELOC_FIXUP_MODE vita vertex=post-reloc-manifest-strict chain-vtx=disabled texture=lazy token_namespace=0x40-0x7F live-command-disambiguation\n");
 		sVitaLazyOnlyModeLogged = true;
 	}
 #else
@@ -1629,18 +1629,10 @@ extern "C" int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
 
 	/* The w0 candidate at slot-4 may be a TOKEN this same walk already wrote:
 	 * chain entries are frequently adjacent words, so the "command" preceding
-	 * this slot is the previous entry's freshly-tokenized slot. A token's top
-	 * byte is its generation >> 4 — at gen 16..31 that byte is 0x01 (G_VTX),
-	 * at gen 4048..4063 it's 0xFD (SETTIMG) — and the rest of the token also
-	 * passes the structural checks (reserved bits zero, plausible num_vtx).
-	 * Parsing such a token as a command applies vertex/texture byte
-	 * permutations over live chain descriptors: observed 2026-07-31 as a
-	 * gen-16 token misparse that rot16'd five descriptors in
-	 * reloc_effects/EFCommonEffects2, derailing the walk into a token-feedback
-	 * spiral that exhausted the slot table (abort in portRelocRegisterPointer).
-	 * A live tokenized slot is never a real command word — skip. Corpse
-	 * entries (address reused, word no longer a resolving token) are pruned
-	 * so a stale registry can't suppress real fixups. */
+	 * this slot can be the previous entry's freshly-tokenized slot. Legacy
+	 * generation-in-high-bits tokens could therefore become 0x01 (G_VTX) or
+	 * 0xFD (SETTIMG) after enough reloads and be parsed as commands. v10 pins tokens to 0x80..0x9F, which is outside every command
+	 * opcode band used by the port and outside N64 segment IDs. Keep this live-slot guard as defense in depth. */
 	{
 		uintptr_t w0_addr = (uintptr_t)(file_bytes + slot_byte_off) - 4;
 		auto it = sChainSlotAddrs.find(w0_addr);
@@ -1764,8 +1756,14 @@ static bool manifest_resolve_resource_pointer(uint32_t raw,
                                               void **out_ptr)
 {
 	extern void *portRelocTryResolvePointer(uint32_t token);
+	extern int portRelocIsPointerToken(uint32_t token);
 
 	void *resolved = raw != 0 ? portRelocTryResolvePointer(raw) : nullptr;
+
+	/* v10: if this value belongs to the reloc-token namespace but no longer
+	 * resolves, it is stale. Never reinterpret it as a segment-0E address. */
+	if (resolved == nullptr && raw != 0 && portRelocIsPointerToken(raw))
+		return false;
 
 	if (resolved == nullptr)
 	{
@@ -1845,6 +1843,15 @@ static ManifestDlResult manifest_parse_packed_dl(void *candidate,
 		const uint32_t w0 = cmd[0];
 		const uint32_t w1 = cmd[1];
 		const uint8_t op = (uint8_t)(w0 >> 24);
+
+		/* v11: 0x40..0x44 are legitimate OTR command opcodes, so namespace-only
+		 * classification is not valid for a display-list command word. Reject w0
+		 * as pointer data only when it is a currently-live relocation token. This
+		 * preserves v9's host-pointer-safe token namespace without hiding real OTR
+		 * commands used by the intro/effects display lists. */
+		extern void *portRelocTryResolvePointer(uint32_t token);
+		if (portRelocTryResolvePointer(w0) != nullptr)
+			return ManifestDlResult{};
 
 		if (!manifest_opcode_plausible(op))
 			return ManifestDlResult{};

@@ -48,7 +48,7 @@
  * already relies on for its own crash-time log writes - so there is no
  * userspace buffer to fill and no stdio lock to contend on. */
 
-#define LOG_QUEUE_SLOTS 128
+#define LOG_QUEUE_SLOTS 256
 #define LOG_LINE_MAX 512
 
 typedef struct {
@@ -57,6 +57,9 @@ typedef struct {
 	int tail; /* next slot to drain */
 	int count;
 	int shutdown;
+	unsigned int dropped;
+	unsigned int high_water;
+	unsigned int pushed;
 	pthread_mutex_t mutex;
 	pthread_cond_t cond;
 	pthread_t thread;
@@ -73,8 +76,11 @@ static void QueuePush(LogQueue *q, const char *line)
 {
 	pthread_mutex_lock(&q->mutex);
 	if (q->count >= LOG_QUEUE_SLOTS) {
-		/* Drop rather than block the caller - the whole point of this
-		 * queue is to keep slow I/O off whatever thread is logging. */
+		/* Never block the caller, but make loss observable.  The old logger
+		 * silently dropped the exact high-rate fighter-audit bursts needed to
+		 * diagnose partial models, making an incomplete log look like an
+		 * incomplete DObj tree. */
+		q->dropped++;
 		pthread_mutex_unlock(&q->mutex);
 		return;
 	}
@@ -82,9 +88,16 @@ static void QueuePush(LogQueue *q, const char *line)
 	 * Avoid redundant pthread condition-variable (and underlying kernel
 	 * semaphore) bookkeeping on every line in a high-rate logging burst. */
 	const int was_empty = (q->count == 0);
-	memcpy(q->lines[q->head], line, LOG_LINE_MAX);
+	size_t len = 0;
+	while ((len < (LOG_LINE_MAX - 1)) && (line[len] != '\0')) len++;
+	memcpy(q->lines[q->head], line, len);
+	q->lines[q->head][len] = '\0';
 	q->head = (q->head + 1) % LOG_QUEUE_SLOTS;
 	q->count++;
+	q->pushed++;
+	if ((unsigned int)q->count > q->high_water) {
+		q->high_water = (unsigned int)q->count;
+	}
 	if (was_empty) {
 		pthread_cond_signal(&q->cond);
 	}
@@ -220,6 +233,33 @@ int port_log_get_fd(void)
 	return sLogFd;
 }
 
+unsigned int port_log_get_dropped_lines(void)
+{
+	unsigned int dropped;
+	pthread_mutex_lock(&sFileQueue.mutex);
+	dropped = sFileQueue.dropped;
+	pthread_mutex_unlock(&sFileQueue.mutex);
+	return dropped;
+}
+
+unsigned int port_log_get_queue_high_water(void)
+{
+	unsigned int high_water;
+	pthread_mutex_lock(&sFileQueue.mutex);
+	high_water = sFileQueue.high_water;
+	pthread_mutex_unlock(&sFileQueue.mutex);
+	return high_water;
+}
+
+unsigned int port_log_get_queued_lines(void)
+{
+	unsigned int queued;
+	pthread_mutex_lock(&sFileQueue.mutex);
+	queued = (unsigned int)sFileQueue.count;
+	pthread_mutex_unlock(&sFileQueue.mutex);
+	return queued;
+}
+
 void port_log(const char *fmt, ...)
 {
 	char formatted[LOG_LINE_MAX];
@@ -243,6 +283,12 @@ void port_log(const char *fmt, ...)
 	vsnprintf(formatted, sizeof(formatted), fmt, ap);
 #endif
 	va_end(ap);
+
+	/* Some snprintf implementations are allowed to leave the destination
+	 * unterminated on truncation.  Every downstream consumer uses C-string
+	 * semantics, so make this invariant explicit instead of letting strlen()
+	 * walk into an adjacent queue slot. */
+	formatted[LOG_LINE_MAX - 1] = '\0';
 
 #if defined(__vita__) && defined(PORT_LOG_STDOUT)
 	if (sPrintQueue.started) {

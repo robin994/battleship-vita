@@ -23,6 +23,13 @@ void port_log_close(void);
  * Used by async-signal-safe crash handlers that cannot call fprintf. */
 int port_log_get_fd(void);
 
+/* Diagnostics for the asynchronous file queue.  Counters are cumulative
+ * from port_log_init() and let high-rate audits prove whether any lines were
+ * lost instead of inferring it from gaps in the log. */
+unsigned int port_log_get_dropped_lines(void);
+unsigned int port_log_get_queue_high_water(void);
+unsigned int port_log_get_queued_lines(void);
+
 /* Write a formatted message to the log file. */
 #ifdef __GNUC__
 __attribute__((format(printf, 1, 2)))

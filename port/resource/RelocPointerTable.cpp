@@ -8,29 +8,19 @@
 /**
  * Per-slot generational handle table mapping 32-bit token ↔ 64-bit pointer.
  *
- * Token layout: [12 bits slot-generation][20 bits slot-index]
- *   - Slot generations are PER-SLOT, not global. Each slot starts at gen 1
- *     and bumps on every release (reuse). A token resolves only if its
- *     embedded gen matches the slot's current gen — stale tokens (whose
- *     slot has been reused) fail decode and resolve to NULL.
- *   - 1M indices, 4096 generations per slot — effectively infinite reuse
- *     headroom in any realistic session.
- *
- * Why per-slot instead of global gen:
- *   Earlier design bumped a single global gen on every scene reset and
- *   memset'd the entire table. That invalidated tokens for files in the
- *   intern buffer (mainmotion, submotion, model, special1-4, shieldpose)
- *   which legitimately persist across scenes — their underlying memory is
- *   still valid, but the tokens encoding it had a stale gen. Downstream
- *   resolvers returned NULL, downstream consumers (gcSetupCustomDObjs,
- *   ftMainSetStatus joint init, etc.) didn't always NULL-check, and
- *   crashed. With per-slot gens we never artificially invalidate a slot
- *   whose memory is still live; portRelocInvalidateRange() selectively
- *   bumps only those slots whose backing pointer falls in a recycled
- *   memory range (scene arena, freed reloc file, etc.).
+ * v11 token layout: [2-bit namespace tag=01][12-bit slot-generation][18-bit slot-index]
+ *   - Tokens stay in 0x40000000..0x7FFFFFFF, disjoint from Vita user pointers
+ *     observed in the 0x8x/0x9x region and from classic N64 segment IDs.
+ *   - 0x40..0x44 are also valid OTR command opcodes, so display-list command
+ *     scanners MUST NOT classify w0 by namespace alone. They use live token
+ *     resolution to disambiguate pointer data from actual commands.
+ *   - Slot generations are per-slot. A token resolves only while its embedded
+ *     generation matches the slot generation; stale tokens fail resolution.
+ *   - 262143 live indices and 4095 generations per slot. The table starts at
+ *     64K entries and can grow to 256K.
  *
  * Recovery: invalidated slots go on a free list; subsequent registrations
- * pull from it before extending sNextIndex. The table doesn't grow without
+ * pull from it before extending sNextIndex. The table does not grow without
  * bound across long sessions.
  */
 
@@ -42,10 +32,20 @@ struct Slot {
                           * 1..GEN_MAX = registered; reuse bumps. */
 };
 
-constexpr uint32_t TOKEN_GENERATION_SHIFT = 20;
-constexpr uint32_t TOKEN_INDEX_MASK       = 0x000FFFFFu;       /* 20 bits = 1M-1 */
+/* v11: keep the proven v9 token address-space separation: top bits 01
+ * (0x40..0x7F). Vita user pointers live in the 0x8x/0x9x region, so this tag
+ * cannot alias ordinary host pointers. v10 moved the tag to 0x80..0x9F to
+ * avoid OTR command-word collisions, but that made every normal 0x8xxxxxxx
+ * Vita pointer look like a stale token. Command-word disambiguation now uses
+ * live-token resolution at the DL validator instead of changing the pointer
+ * namespace. Preserve all 12 generation bits and 18 index bits. */
+constexpr uint32_t TOKEN_TAG              = 0x40000000u;
+constexpr uint32_t TOKEN_TAG_MASK         = 0xC0000000u;
+constexpr uint32_t TOKEN_GENERATION_SHIFT = 18;
 constexpr uint32_t TOKEN_GENERATION_MAX   = 0xFFFu;            /* 12 bits */
-constexpr uint32_t INITIAL_CAPACITY       = 256 * 1024;        /* ~4 MB initial. */
+constexpr uint32_t TOKEN_INDEX_MASK       = 0x0003FFFFu;       /* 18 bits = 256K-1 */
+constexpr uint32_t MAX_CAPACITY           = TOKEN_INDEX_MASK + 1u;
+constexpr uint32_t INITIAL_CAPACITY       = 64 * 1024;         /* grows to 256K. */
 
 static Slot     *sSlots       = nullptr;
 static uint32_t  sNextIndex   = 1;                              /* Index 0 reserved. */
@@ -63,12 +63,8 @@ static void ensureCapacity(void)
         sCapacity = INITIAL_CAPACITY;
         sSlots = (Slot *)calloc(sCapacity, sizeof(Slot));
         /* DIAG (SSB64_RELOC_GEN_SEED=<n>): pre-age every slot's generation.
-         * Token top byte = gen >> 4, so gens 16..31 mint 0x01xxxxxx tokens
-         * (G_VTX opcode) and 4048..4063 mint 0xFDxxxxxx (SETTIMG) — the
-         * bands where a tokenized chain slot masquerades as a GBI command
-         * to the chain-walk texture/vertex fixup. Seeding 15 arms the
-         * G_VTX band from the very first registration instead of after
-         * ~13 scene transitions. Zero cost when unset. */
+         * v11 keeps this stress hook; TOKEN_TAG pins every token outside the
+         * Vita 0x8x/0x9x host-pointer range. Zero cost when unset. */
         if (sSlots != nullptr) {
             const char *seed_env = getenv("SSB64_RELOC_GEN_SEED");
             if (seed_env != nullptr) {
@@ -82,11 +78,12 @@ static void ensureCapacity(void)
         return;
     }
     if (sNextIndex >= sCapacity) {
-        uint32_t newCapacity = sCapacity * 2;
-        if (newCapacity > TOKEN_INDEX_MASK) {
+        if (sCapacity >= MAX_CAPACITY) {
             spdlog::error("RelocPointerTable: token index capacity exhausted");
             abort();
         }
+        uint32_t newCapacity = sCapacity * 2;
+        if (newCapacity > MAX_CAPACITY) newCapacity = MAX_CAPACITY;
         spdlog::info("RelocPointerTable: growing {} -> {} entries",
                      sCapacity, newCapacity);
         Slot *grown = (Slot *)realloc(sSlots, newCapacity * sizeof(Slot));
@@ -111,14 +108,24 @@ static uint32_t bumpSlotGeneration(uint32_t gen)
 
 static uint32_t makeToken(uint32_t index, uint32_t gen)
 {
-    return (gen << TOKEN_GENERATION_SHIFT) | (index & TOKEN_INDEX_MASK);
+    return TOKEN_TAG |
+           ((gen & TOKEN_GENERATION_MAX) << TOKEN_GENERATION_SHIFT) |
+           (index & TOKEN_INDEX_MASK);
+}
+
+static bool tokenHasNamespace(uint32_t token)
+{
+    return (token & TOKEN_TAG_MASK) == TOKEN_TAG;
 }
 
 static bool decodeToken(uint32_t token, uint32_t *outIndex)
 {
-    uint32_t tokenGen   = token >> TOKEN_GENERATION_SHIFT;
+    if (!tokenHasNamespace(token)) {
+        return false;
+    }
+    uint32_t tokenGen   = (token >> TOKEN_GENERATION_SHIFT) & TOKEN_GENERATION_MAX;
     uint32_t tokenIndex = token & TOKEN_INDEX_MASK;
-    if (token == 0 || tokenGen == 0 || tokenIndex == 0 || tokenIndex >= sNextIndex) {
+    if (tokenGen == 0 || tokenIndex == 0 || tokenIndex >= sNextIndex) {
         return false;
     }
     if (sSlots == nullptr) {
@@ -155,8 +162,10 @@ uint32_t portRelocRegisterPointer(void *ptr)
         }
         gen = sSlots[index].gen;
     } else {
+        /* ensureCapacity() above guarantees sNextIndex is a writable slot.
+         * Grow before allocation, not after incrementing, so the last valid
+         * index in the 18-bit namespace remains usable. */
         index = sNextIndex++;
-        ensureCapacity();
         gen = bumpSlotGeneration(sSlots[index].gen);
         sSlots[index].gen = gen;
     }
@@ -183,7 +192,7 @@ void *portRelocResolvePointerDebug(uint32_t token, const char *file, int line)
          * the same value anyway. */
         static uint32_t sStaleLogCount = 0;
         if ((sStaleLogCount++ & 0x3FF) == 0) {
-            uint32_t tokenGen   = token >> TOKEN_GENERATION_SHIFT;
+            uint32_t tokenGen   = (token >> TOKEN_GENERATION_SHIFT) & TOKEN_GENERATION_MAX;
             uint32_t tokenIndex = token & TOKEN_INDEX_MASK;
             uint32_t slotGen    = (sSlots && tokenIndex < sNextIndex) ? sSlots[tokenIndex].gen : 0;
             if (file != nullptr) {
@@ -208,6 +217,14 @@ void *portRelocTryResolvePointer(uint32_t token)
         return nullptr;
     }
     return sSlots[index].ptr;
+}
+
+int portRelocIsPointerToken(uint32_t token)
+{
+    /* Namespace detection is intentionally independent of liveness. A stale
+     * token must still be recognized as a token so callers do not reinterpret
+     * it as a segmented address, packed GBI command, or host pointer. */
+    return tokenHasNamespace(token) ? 1 : 0;
 }
 
 /**

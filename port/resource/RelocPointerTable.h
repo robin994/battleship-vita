@@ -13,8 +13,9 @@
  *   - Game code resolves tokens back to pointers via RELOC_RESOLVE().
  *
  * Token 0 is reserved for NULL.
- * Tokens contain a generation plus an index into a flat array — resolution is
- * O(1), and stale tokens from earlier scene/setup generations are rejected.
+ * Tokens contain a reserved namespace tag, a generation, and an index into a
+ * flat array — resolution is O(1), stale tokens are rejected, and token values
+ * cannot alias N64 segment IDs or any command opcode used by the port as generations advance.
  */
 
 #include <stddef.h>
@@ -43,6 +44,13 @@ void *portRelocResolvePointerDebug(uint32_t token, const char *file, int line);
  * other 32-bit address encodings such as N64 segmented addresses.
  */
 void *portRelocTryResolvePointer(uint32_t token);
+
+/**
+ * Return non-zero when a 32-bit value belongs to the reloc-token namespace,
+ * even if the token is stale and no longer resolves. Consumers must not fall
+ * through and reinterpret such a value as a segmented address or raw pointer.
+ */
+int portRelocIsPointerToken(uint32_t token);
 
 /**
  * Reset the token table (hard wipe — clears all slots, resets free list).
