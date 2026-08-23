@@ -19,6 +19,16 @@ u8 port_diag_get_scene_prev(void)
 	return gSCManagerSceneData.scene_prev;
 }
 
+u8 port_diag_get_stage_kind(void)
+{
+	return gSCManagerSceneData.gkind;
+}
+
+u32 port_diag_get_task_frame_count(void)
+{
+	return dSYTaskmanFrameCount;
+}
+
 const char *port_diag_get_scene_name(u8 id)
 {
 	switch (id) {

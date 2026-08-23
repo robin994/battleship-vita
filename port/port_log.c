@@ -49,6 +49,7 @@
  * userspace buffer to fill and no stdio lock to contend on. */
 
 #define LOG_QUEUE_SLOTS 256
+#define LOG_QUEUE_PRIORITY_RESERVE 32
 #define LOG_LINE_MAX 512
 
 typedef struct {
@@ -72,14 +73,34 @@ static LogQueue sPrintQueue = { .mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHR
 #endif
 static LogQueue sFileQueue = { .mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 
-static void QueuePush(LogQueue *q, const char *line)
+static int LogLineIsPriority(const char *line)
+{
+	static const char *const markers[] = {
+		"_REJECT", "_MISMATCH", "_STALE_DROP", " OVERFLOW",
+		"_OOB", "UNDERFLOW", "QUARANTINE", "ABORT", "ANOMALY",
+		"WARNING", "CAUGHT", " FAIL", "ERROR", "TASK_SEAL",
+		"FAST3D_SCENE", "VITA_SCENE_RENDER"
+	};
+	size_t i;
+
+	for (i = 0; i < (sizeof(markers) / sizeof(markers[0])); i++) {
+		if (strstr(line, markers[i]) != NULL) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void QueuePush(LogQueue *q, const char *line, int priority)
 {
 	pthread_mutex_lock(&q->mutex);
-	if (q->count >= LOG_QUEUE_SLOTS) {
+	if (q->count >= (priority ? LOG_QUEUE_SLOTS :
+	                (LOG_QUEUE_SLOTS - LOG_QUEUE_PRIORITY_RESERVE))) {
 		/* Never block the caller, but make loss observable.  The old logger
 		 * silently dropped the exact high-rate fighter-audit bursts needed to
-		 * diagnose partial models, making an incomplete log look like an
-		 * incomplete DObj tree. */
+		 * diagnose partial models.  Normal telemetry now leaves a small reserve
+		 * for reject/mismatch/overflow markers, so saturation cannot erase the
+		 * evidence that distinguishes a bad resource from a renderer failure. */
 		q->dropped++;
 		pthread_mutex_unlock(&q->mutex);
 		return;
@@ -263,6 +284,7 @@ unsigned int port_log_get_queued_lines(void)
 void port_log(const char *fmt, ...)
 {
 	char formatted[LOG_LINE_MAX];
+	int priority;
 	va_list ap;
 	va_start(ap, fmt);
 	/* sceClibVsnprintf, not newlib's vsnprintf: a real-hardware crash landed
@@ -289,13 +311,14 @@ void port_log(const char *fmt, ...)
 	 * semantics, so make this invariant explicit instead of letting strlen()
 	 * walk into an adjacent queue slot. */
 	formatted[LOG_LINE_MAX - 1] = '\0';
+	priority = LogLineIsPriority(formatted);
 
 #if defined(__vita__) && defined(PORT_LOG_STDOUT)
 	if (sPrintQueue.started) {
-		QueuePush(&sPrintQueue, formatted);
+		QueuePush(&sPrintQueue, formatted, priority);
 	}
 #endif
 	if (sFileQueue.started) {
-		QueuePush(&sFileQueue, formatted);
+		QueuePush(&sFileQueue, formatted, priority);
 	}
 }

@@ -197,14 +197,17 @@ static int sGbiTraceInitDone = 0;
 static int sFrameTriCount = 0;
 static int sFrameRectPx = 0;
 static int sFrameLoadBytes = 0;
+static int sFrameCommandCount = 0;
 static int sLastDLTris = 0;
 static int sLastDLRectPx = 0;
 static int sLastDLLoadBytes = 0;
+static int sLastDLCommands = 0;
 static float sLastDLTriAreaPx = 0.0f;
 
 /* Thin C wrapper for the trace callback (matches GbiTraceCallbackFn signature) */
 static void gbi_trace_callback(uintptr_t w0, uintptr_t w1, int dl_depth)
 {
+	sFrameCommandCount++;
 	gbi_trace_log_cmd((unsigned long long)w0, (unsigned long long)w1, dl_depth);
 
 	uint8_t opcode = (uint8_t)((w0 >> 24) & 0xFFu);
@@ -483,6 +486,7 @@ extern "C" void port_submit_display_list(void *dl)
 	sFrameTriCount = 0;
 	sFrameRectPx = 0;
 	sFrameLoadBytes = 0;
+	sFrameCommandCount = 0;
 
 	if (dl == NULL) {
 		port_log("SSB64: WARNING — display list is NULL!\n");
@@ -581,6 +585,7 @@ extern "C" void port_drain_pending_display_list(void)
 		sFrameTriCount = 0;
 		sFrameRectPx = 0;
 		sFrameLoadBytes = 0;
+		sFrameCommandCount = 0;
 		try {
 			window->DrawAndRunGraphicsCommands(dl, portInterpGetReplacements(sub, subframes));
 		} catch (long hr) {
@@ -603,6 +608,7 @@ extern "C" void port_drain_pending_display_list(void)
 			sLastDLTris = sFrameTriCount;
 			sLastDLRectPx = sFrameRectPx;
 			sLastDLLoadBytes = sFrameLoadBytes;
+			sLastDLCommands = sFrameCommandCount;
 			{
 				extern float gfx_get_frame_tri_area_px(void);
 				sLastDLTriAreaPx = gfx_get_frame_tri_area_px();
@@ -610,6 +616,25 @@ extern "C" void port_drain_pending_display_list(void)
 		}
 	}
 	portInterpEndDraw();
+
+#if defined(__vita__)
+	{
+		extern unsigned char port_diag_get_scene_curr(void);
+		extern unsigned char port_diag_get_stage_kind(void);
+		extern unsigned int port_diag_get_task_frame_count(void);
+		const unsigned int taskFrame = port_diag_get_task_frame_count();
+
+		if (taskFrame < 8) {
+			port_log("SSB64: FAST3D_SCENE scene=%u stage=%u task_frame=%u generation=%u "
+			         "root=%p commands=%d tris=%d rect_px=%d load_bytes=%d subframes=%d\n",
+			         (unsigned int)port_diag_get_scene_curr(),
+			         (unsigned int)port_diag_get_stage_kind(), taskFrame,
+			         portRelocGetLifetimeGeneration(), static_cast<void *>(dl),
+			         sLastDLCommands, sLastDLTris, sLastDLRectPx,
+			         sLastDLLoadBytes, subframes);
+		}
+	}
+#endif
 
 	sDLSubmitsThisFrame++;
 	gbi_trace_end_frame();
