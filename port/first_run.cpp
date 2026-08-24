@@ -25,6 +25,10 @@
 #include <windows.h>
 #endif
 
+#ifdef __vita__
+#include <vitasdk.h>
+#endif
+
 namespace fs = std::filesystem;
 
 // Region the binary was compiled for (see CMake REGION_US/REGION_JP).
@@ -34,13 +38,17 @@ namespace fs = std::filesystem;
 // is byte-for-byte unchanged.
 #if defined(REGION_JP)
 static constexpr const char* kRegion  = "jp";
-static constexpr const char* kRomBase = "baserom.jp";
 static constexpr const char* kRomDesc = "Japanese (NALJ) \"Nintendo All-Star! "
                                         "Dairantou Smash Brothers\" ROM";
 #else
 static constexpr const char* kRegion  = "us";
-static constexpr const char* kRomBase = "baserom.us";
 static constexpr const char* kRomDesc = "Super Smash Bros. NTSC-U v1.0 ROM";
+#endif
+
+#if defined(REGION_JP)
+static constexpr const char* kRomBase = "baserom.jp";
+#else
+static constexpr const char* kRomBase = "baserom.us";
 #endif
 
 namespace ssb64 {
@@ -388,6 +396,37 @@ ExtractionResult ExtractAssetsIfNeeded(const std::string& target_o2r_path, bool 
     std::error_code ec;
     const fs::path absoluteTargetPath = ResolveAbsolute(fs::path(target_o2r_path), ec);
     const fs::path targetPath = ec ? fs::path(target_o2r_path) : absoluteTargetPath;
+
+#ifdef __vita__
+    (void)silent;
+    (void)romOverridePath;
+    // Vita never extracts on-device. Two reasons, not one: there's no
+    // shell/subprocess to spawn a standalone torch binary (it's linked
+    // straight into battleship.elf, see Makefile.vita's TORCH_SOURCES),
+    // and calling Torch's in-process Companion API directly was tried and
+    // abandoned - VitaSDK's packaged libyaml-cpp.a returns wrong node
+    // types for nested YAML lookups (an ARM EABI enum-size ABI mismatch:
+    // the package wasn't built with -fno-short-enums, this project's
+    // CFLAGS always is), so config.yml parsing inside Companion::Process()
+    // failed non-deterministically. The README's "Generating and
+    // installing the required data" section documents the sanctioned
+    // workflow instead: run scripts/extract-vita-data.sh on a PC, then
+    // copy the resulting BattleShip.o2r onto the memory card by hand.
+    if (fs::exists(targetPath, ec)) {
+        return { true, targetPath.string(), {}, {} };
+    }
+    port_log("first_run: ERROR %s missing - Vita builds don't extract on-device, "
+             "see the README's asset-generation section\n",
+             targetPath.string().c_str());
+    const std::string msg =
+        std::string(SSB64_O2R_NAME) + " not found.\n\n"
+        "This build doesn't extract assets on the device. On a PC, from the "
+        "repo, run:\n  scripts/extract-vita-data.sh /path/to/your/ROM\n\n"
+        "(see \"Generating and installing the required data\" in the "
+        "project's README on GitHub), then copy the result onto the memory "
+        "card at:\n  " + targetPath.string();
+    return { false, {}, msg, {} };
+#else
     bool staleRecipe = false;
     if (fs::exists(targetPath, ec)) {
 #if defined(__ANDROID__)
@@ -444,7 +483,7 @@ ExtractionResult ExtractAssetsIfNeeded(const std::string& target_o2r_path, bool 
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
                                      "ROM not found", msg.c_str(), nullptr);
         }
-        return { false, {}, "ROM not found", {} };
+        return { false, {}, msg, {} };
     }
 
     ec.clear();
@@ -566,10 +605,11 @@ ExtractionResult ExtractAssetsIfNeeded(const std::string& target_o2r_path, bool 
 
     port_log("first_run: extracted %s -> %s\n", SSB64_O2R_NAME, targetPath.string().c_str());
     return { true, targetPath.string(), {}, logPath };
+#endif // __vita__
 }
 
-bool RunFirstRunWizard(const std::string& target_o2r_path) {
-    port_log("first_run: launching ImGui wizard\n");
+bool RunFirstRunWizard(const std::string& target_o2r_path, const ExtractionResult& lastAttempt) {
+    port_log("first_run: launching first-run screen\n");
 
     auto context = Ship::Context::GetInstance();
     auto window = context->GetWindow();
@@ -578,6 +618,51 @@ bool RunFirstRunWizard(const std::string& target_o2r_path) {
         return false;
     }
 
+#ifdef __vita__
+    // Vita never attempts on-device extraction (see ExtractAssetsIfNeeded's
+    // __vita__ branch) - this screen just explains that and waits for the
+    // one input we can read directly from hardware, bypassing ImGui/SDL
+    // input entirely: Cross, via sceCtrlPeekBufferPositive. (There's no
+    // mouse/touch wired into ImGui on this platform either - HandleEvents()
+    // in gfx_sdl2.cpp only synthesizes SELECT->Escape and filters out
+    // controller events - so a Browse/Retry button here would be dead
+    // regardless.)
+    const std::string message = !lastAttempt.error.empty()
+                                    ? lastAttempt.error
+                                    : "BattleShip.o2r is missing and couldn't be checked for an unknown reason.";
+    port_log("first_run: %s\n", message.c_str());
+
+    uint32_t oldpad = 0;
+    while (window->IsRunning()) {
+        SceCtrlData pad;
+        sceCtrlPeekBufferPositive(0, &pad, 1);
+        const bool crossPressed = (pad.buttons & SCE_CTRL_CROSS) && !(oldpad & SCE_CTRL_CROSS);
+        oldpad = pad.buttons;
+        if (crossPressed) {
+            break;
+        }
+
+        DrawWizardFrame([&] {
+            ImGui::OpenPopup("Assets required");
+            const ImVec2 viewportCenter = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(viewportCenter, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(780, 0));
+            if (ImGui::BeginPopupModal("Assets required", nullptr,
+                                       ImGuiWindowFlags_AlwaysAutoResize |
+                                       ImGuiWindowFlags_NoMove |
+                                       ImGuiWindowFlags_NoSavedSettings)) {
+                ImGui::TextWrapped("%s", message.c_str());
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "Press X to exit.");
+                ImGui::EndPopup();
+            }
+        });
+    }
+    port_log("first_run: exiting — copy BattleShip.o2r over and relaunch\n");
+    return false;
+#else
+    (void)lastAttempt;
     const std::string appData = Ship::Context::GetAppDirectoryPath();
 
     // 256 char ImGui input buffer. Pre-fill with the conventional path the
@@ -790,6 +875,7 @@ bool RunFirstRunWizard(const std::string& target_o2r_path) {
     }
     port_log("first_run: wizard completed successfully\n");
     return true;
+#endif // __vita__
 }
 
 } // namespace ssb64

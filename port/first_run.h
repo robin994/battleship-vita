@@ -28,7 +28,15 @@ ExtractionResult ExtractAssetsIfNeeded(const std::string& target_o2r_path, bool 
  *
  * Requires Window/Gui already initialized. Spins its own pre-gameloop
  * render loop using gui->StartDraw() / window->RunGuiOnly() / gui->EndDraw().
+ *
+ * lastAttempt: the result of the ExtractAssetsIfNeeded() call the caller
+ * already made before deciding a wizard/screen is needed. Vita has no
+ * Browse/Retry UI (see RunFirstRunWizard's __vita__ branch) - it just
+ * displays lastAttempt.error verbatim and waits for Cross to exit, so the
+ * caller's diagnosis (missing ROM vs. a real extraction failure) reaches
+ * the user instead of a generic message.
  */
-bool RunFirstRunWizard(const std::string& target_o2r_path);
+bool RunFirstRunWizard(const std::string& target_o2r_path,
+                       const ExtractionResult& lastAttempt = {});
 
 } // namespace ssb64

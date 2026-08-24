@@ -1310,13 +1310,13 @@ static int PortInitImpl(int argc, char* argv[]) {
 		// silent=true: any failure during this auto-attempt should land in
 		// the wizard's status text, not a native popup that races the
 		// ImGui modal.
-		ssb64::ExtractAssetsIfNeeded(targetO2r, /*silent=*/true);
+		ssb64::ExtractionResult extractResult = ssb64::ExtractAssetsIfNeeded(targetO2r, /*silent=*/true);
 		std::error_code ec;
 		// noexcept exists / PortLocateFile rather than the throwing LUS
 		// form — issue #58.
 		if (!std::filesystem::exists(targetO2r, ec) &&
 		    !std::filesystem::exists(PortLocateFile(SSB64_O2R_NAME), ec)) {
-			if (!ssb64::RunFirstRunWizard(targetO2r)) {
+			if (!ssb64::RunFirstRunWizard(targetO2r, extractResult)) {
 				port_log("SSB64: first-run wizard cancelled — exiting\n");
 				// PortShutdown drops audio bridge refs + resets sContext
 				// before main returns. Without it, IResource destructors
