@@ -640,16 +640,81 @@ static std::map<uintptr_t, uintptr_t> sTexFixupRanges;
  * read must never byte-swap the mixed source resource in place. */
 using RuntimeTextureDecodeKey = std::pair<uintptr_t, size_t>;
 static std::map<RuntimeTextureDecodeKey, std::vector<uint32_t>> sRuntimeTextureDecodeCache;
+/* Output-address registry for the immutable renderer-owned copies above.
+ * Fast3D's texture cache uses this to skip re-hashing texels that cannot
+ * change in place. The GPU cache entry is explicitly deleted before the
+ * decoded vector is destroyed, so pointer reuse cannot create a stale hit. */
+static std::map<uintptr_t, uintptr_t> sRuntimeTextureDecodedRanges;
+constexpr unsigned int kRuntimeTextureRangeHotCacheSize = 32u;
+struct RuntimeTextureRangeHotEntry
+{
+	uintptr_t begin = 0;
+	uintptr_t end = 0;
+};
+static RuntimeTextureRangeHotEntry sRuntimeTextureRangeHotCache[kRuntimeTextureRangeHotCacheSize];
+
+static inline unsigned int runtime_texture_range_hot_index(uintptr_t begin, uintptr_t end)
+{
+	return (unsigned int)(((begin >> 4) ^ (end >> 8)) & (kRuntimeTextureRangeHotCacheSize - 1u));
+}
+
+static void runtime_texture_range_hot_cache_clear()
+{
+	for (auto &entry : sRuntimeTextureRangeHotCache)
+		entry = RuntimeTextureRangeHotEntry{};
+}
+
+/* Vertex resources stay immutable on Vita for correctness, but decoding the
+ * same G_VTX range into a stack buffer on every draw reintroduced the exact
+ * per-dispatch lookup/conversion tax that the texture range cache removed.
+ * Cache stable host-order copies by source+count and evict them whenever the
+ * owning reloc memory is recycled. */
+using RuntimeVertexDecodeKey = std::pair<uintptr_t, unsigned int>;
+struct RuntimeVertexDecodeEntry
+{
+	std::vector<uint32_t> words;
+	int file_id = -1;
+};
+static std::map<RuntimeVertexDecodeKey, RuntimeVertexDecodeEntry> sRuntimeVertexDecodeCache;
+
+/* G_VTX repeatedly revisits a small working set of vertex spans (especially
+ * with several fighters sharing the same model parts). Avoid a tree lookup on
+ * every dispatch once a decoded span is hot. Map nodes/vectors are stable
+ * until explicit range eviction; those eviction paths clear this cache first. */
+constexpr unsigned int kRuntimeVertexHotCacheSize = 64u;
+struct RuntimeVertexHotEntry
+{
+	uintptr_t source = 0;
+	unsigned int count = 0;
+	const void *decoded = nullptr;
+};
+static RuntimeVertexHotEntry sRuntimeVertexHotCache[kRuntimeVertexHotCacheSize];
+
+static inline unsigned int runtime_vertex_hot_index(uintptr_t source, unsigned int count)
+{
+	return (unsigned int)(((source >> 4) ^ (source >> 12) ^ count) & (kRuntimeVertexHotCacheSize - 1u));
+}
+
+static void runtime_vertex_hot_cache_clear()
+{
+	for (auto &entry : sRuntimeVertexHotCache)
+		entry = RuntimeVertexHotEntry{};
+}
 
 static void runtime_texture_decode_cache_evict(uintptr_t begin, uintptr_t end)
 {
+	runtime_texture_range_hot_cache_clear();
 	for (auto it = sRuntimeTextureDecodeCache.begin(); it != sRuntimeTextureDecodeCache.end(); )
 	{
 		const uintptr_t source = it->first.first;
 		if (source >= begin && source < end)
 		{
 			if (!it->second.empty())
+			{
+				const uintptr_t decoded_begin = reinterpret_cast<uintptr_t>(it->second.data());
 				portTextureCacheDeleteRange(it->second.data(), it->second.size() * sizeof(uint32_t));
+				sRuntimeTextureDecodedRanges.erase(decoded_begin);
+			}
 			it = sRuntimeTextureDecodeCache.erase(it);
 		}
 		else ++it;
@@ -658,12 +723,34 @@ static void runtime_texture_decode_cache_evict(uintptr_t begin, uintptr_t end)
 
 static void runtime_texture_decode_cache_clear()
 {
+	runtime_texture_range_hot_cache_clear();
 	for (auto &entry : sRuntimeTextureDecodeCache)
 	{
 		if (!entry.second.empty())
 			portTextureCacheDeleteRange(entry.second.data(), entry.second.size() * sizeof(uint32_t));
 	}
 	sRuntimeTextureDecodeCache.clear();
+	sRuntimeTextureDecodedRanges.clear();
+}
+
+static void runtime_vertex_decode_cache_evict(uintptr_t begin, uintptr_t end)
+{
+	runtime_vertex_hot_cache_clear();
+	for (auto it = sRuntimeVertexDecodeCache.begin(); it != sRuntimeVertexDecodeCache.end(); )
+	{
+		const uintptr_t source = it->first.first;
+		const uintptr_t source_end = source + (uintptr_t)it->first.second * 16u;
+		if (source < end && begin < source_end)
+			it = sRuntimeVertexDecodeCache.erase(it);
+		else
+			++it;
+	}
+}
+
+static void runtime_vertex_decode_cache_clear()
+{
+	runtime_vertex_hot_cache_clear();
+	sRuntimeVertexDecodeCache.clear();
 }
 
 static void tex_fixup_ranges_insert(uintptr_t begin, uintptr_t end)
@@ -1249,6 +1336,7 @@ extern "C" void portFixupStructU32(void *base, unsigned int byte_offset, unsigne
 extern "C" void portResetStructFixups(void)
 {
 	runtime_texture_decode_cache_clear();
+	runtime_vertex_decode_cache_clear();
 	sStructU16Fixups.clear();
 	sVertexFixups.clear();
 	sManifestDisplayListTargets.clear();
@@ -1267,6 +1355,7 @@ extern "C" void portEvictStructFixupsInRange(const void *begin, size_t size)
 	uintptr_t lo = reinterpret_cast<uintptr_t>(begin);
 	uintptr_t hi = lo + size;
 	runtime_texture_decode_cache_evict(lo, hi);
+	runtime_vertex_decode_cache_evict(lo, hi);
 
 	auto evict_set = [&](std::unordered_set<uintptr_t> &s) {
 		for (auto it = s.begin(); it != s.end(); ) {
@@ -1679,17 +1768,19 @@ extern "C" int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
 		{
 			extern void *portRelocTryResolvePointer(uint32_t token);
 			uint32_t w0_word = *(const uint32_t *)w0_addr;
-			if (w0_word != 0 && portRelocTryResolvePointer(w0_word) != nullptr)
-			{
-				static unsigned int sW0TokenSkips = 0;
-				if (sW0TokenSkips < 16)
+				if (w0_word != 0 && portRelocTryResolvePointer(w0_word) != nullptr)
 				{
-					sW0TokenSkips++;
-					port_log("SSB64: chainFixup SKIP w0-is-chain-token base=%p slot_off=0x%x w0=0x%08X\n",
-					         file_base, slot_byte_off, w0_word);
+#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
+					static unsigned int sW0TokenSkips = 0;
+					if (sW0TokenSkips < 16)
+					{
+						sW0TokenSkips++;
+						port_log("SSB64: chainFixup SKIP w0-is-chain-token base=%p slot_off=0x%x w0=0x%08X\n",
+						         file_base, slot_byte_off, w0_word);
+					}
+#endif
+					return 0;
 				}
-				return 0;
-			}
 			sChainSlotAddrs.erase(it);
 		}
 	}
@@ -1714,20 +1805,22 @@ extern "C" int portRelocFixupTextureFromChain(void *file_base, size_t file_size,
 		if ((slot_byte_off & 0x7) != 4) return 0;
 
 #if defined(__vita__)
-		// Never mutate Vtx payloads from a reloc-chain predecessor heuristic.
-		// The chain only establishes pointer provenance. The post-reloc manifest
-		// is read-only, and GfxSpVertex decodes only actually dispatched G_VTX
-		// targets into temporary host-order storage.
-		int file_id = portRelocFindFileIdAndBase(file_base, nullptr);
-		uint32_t num_vtx = (w0 >> 12) & 0xFFu;
-		static unsigned int sDeferredVertexTrace = 0;
-		if (sDeferredVertexTrace < 64u)
+			// Never mutate Vtx payloads from a reloc-chain predecessor heuristic.
+			// The chain only establishes pointer provenance. The post-reloc manifest
+			// is read-only, and GfxSpVertex decodes only actually dispatched G_VTX
+			// targets into temporary host-order storage.
+#if !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
+			int file_id = portRelocFindFileIdAndBase(file_base, nullptr);
+			uint32_t num_vtx = (w0 >> 12) & 0xFFu;
+			static unsigned int sDeferredVertexTrace = 0;
+			if (sDeferredVertexTrace < 64u)
 		{
 			port_log("SSB64: RELOC_VTX_CHAIN_DEFER file=%d slot=0x%x target=0x%x n=%u reason=runtime-copy-immutable\n",
-			         file_id, slot_byte_off, target_byte_off, num_vtx);
-			++sDeferredVertexTrace;
-		}
-		return 0;
+				         file_id, slot_byte_off, target_byte_off, num_vtx);
+				++sDeferredVertexTrace;
+			}
+#endif
+			return 0;
 #else
 		return chain_fixup_vertex(file_base, file_size, slot_byte_off, target_byte_off, w0);
 #endif
@@ -2132,15 +2225,17 @@ extern "C" void portRelocFinalize3DVertexManifest(void *file_base, size_t file_s
 	}
 	validated_vertices = (unsigned int)unique_vertices.size();
 
-	if (valid_dls > 0u)
-	{
-		port_log("SSB64: RESOURCE_3D_MANIFEST file_id=%u roots=%u valid_dls=%u typed_dl_targets=%u rejected=%u "
-		         "vtx_ranges=%u validated_vertices=%u source_mutations=0 "
-		         "external_vtx=%u external_dl=%u ownership=strict vertex_decode=runtime-copy\n",
-		         file_id, (unsigned int)reloc_slot_count, valid_dls, typed_dl_targets, rejected_roots,
-		         (unsigned int)ranges.size(), validated_vertices,
-		         external_vtx_refs, external_dl_refs);
-	}
+		if (valid_dls > 0u)
+		{
+#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
+			port_log("SSB64: RESOURCE_3D_MANIFEST file_id=%u roots=%u valid_dls=%u typed_dl_targets=%u rejected=%u "
+			         "vtx_ranges=%u validated_vertices=%u source_mutations=0 "
+			         "external_vtx=%u external_dl=%u ownership=strict vertex_decode=runtime-copy\n",
+			         file_id, (unsigned int)reloc_slot_count, valid_dls, typed_dl_targets, rejected_roots,
+			         (unsigned int)ranges.size(), validated_vertices,
+			         external_vtx_refs, external_dl_refs);
+#endif
+		}
 }
 
 #else
@@ -2519,9 +2614,16 @@ extern "C" const void *portRelocDecodeTextureForRuntime(const void *addr, unsign
 	}
 
 	auto inserted = sRuntimeTextureDecodeCache.emplace(key, std::move(decoded));
+	if (!inserted.first->second.empty())
+	{
+		const uintptr_t decoded_begin = reinterpret_cast<uintptr_t>(inserted.first->second.data());
+		const uintptr_t decoded_end = decoded_begin + inserted.first->second.size() * sizeof(uint32_t);
+		sRuntimeTextureDecodedRanges[decoded_begin] = decoded_end;
+	}
 	portStageAuditNoteTexDispatchFile(portRelocFindFileIdAndBase(addr, nullptr));
 	portStageAuditNoteRuntimeTex((unsigned int)(copied_words * sizeof(uint32_t)));
 
+#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
 	static unsigned int sDecodeTrace = 0;
 	if (sDecodeTrace < 96u)
 	{
@@ -2535,32 +2637,88 @@ extern "C" const void *portRelocDecodeTextureForRuntime(const void *addr, unsign
 		         (unsigned int)(copied_words * sizeof(uint32_t)), path ? path : "(unknown)");
 		++sDecodeTrace;
 	}
+#endif
 
 	return inserted.first->second.data();
 #endif
 }
 
-extern "C" int portRelocDecodeVerticesForRuntime(const void *addr, unsigned int num_vtx,
-                                                    void *out_vertices, size_t out_size)
+extern "C" int portRelocIsStableDecodedTextureRange(const void *addr, unsigned int num_bytes)
 {
-	if (addr == nullptr || out_vertices == nullptr || num_vtx == 0) return -1;
+#if !defined(__vita__)
+	(void)addr;
+	(void)num_bytes;
+	return 0;
+#else
+	if (addr == nullptr || num_bytes == 0 || sRuntimeTextureDecodedRanges.empty())
+		return 0;
+
+	const uintptr_t begin = reinterpret_cast<uintptr_t>(addr);
+	const uintptr_t end = begin + static_cast<uintptr_t>(num_bytes);
+	if (end < begin)
+		return 0;
+
+	RuntimeTextureRangeHotEntry &hot =
+		sRuntimeTextureRangeHotCache[runtime_texture_range_hot_index(begin, end)];
+	if (hot.begin == begin && hot.end == end)
+		return 1;
+
+	auto it = sRuntimeTextureDecodedRanges.upper_bound(begin);
+	if (it == sRuntimeTextureDecodedRanges.begin())
+		return 0;
+	--it;
+	if (begin >= it->first && end <= it->second)
+	{
+		hot = RuntimeTextureRangeHotEntry{begin, end};
+		return 1;
+	}
+	return 0;
+#endif
+}
+
+extern "C" const void *portRelocGetDecodedVerticesForRuntime(const void *addr,
+                                                               unsigned int num_vtx)
+{
+	if (addr == nullptr || num_vtx == 0 || num_vtx > 32u) return nullptr;
+
+	const uintptr_t target = reinterpret_cast<uintptr_t>(addr);
+	const RuntimeVertexDecodeKey key{target, num_vtx};
+	RuntimeVertexHotEntry &hot = sRuntimeVertexHotCache[runtime_vertex_hot_index(target, num_vtx)];
+	if (hot.source == target && hot.count == num_vtx && hot.decoded != nullptr)
+	{
+		return hot.decoded;
+	}
+	auto cached = sRuntimeVertexDecodeCache.find(key);
+	if (cached != sRuntimeVertexDecodeCache.end())
+	{
+		if (stage_audit_enabled())
+		{
+			portStageAuditNoteVtxDispatch(1);
+			portStageAuditNoteVtxDispatchFile(cached->second.file_id);
+		}
+		hot = RuntimeVertexHotEntry{target, num_vtx, cached->second.words.data()};
+		return hot.decoded;
+	}
 
 	uintptr_t fileBase = 0;
 	size_t fileSize = 0;
-	int in_reloc_file = portRelocFindContainingFile(addr, &fileBase, &fileSize);
-	portStageAuditNoteVtxDispatch(in_reloc_file);
-	int rt_file_id = in_reloc_file ? portRelocFindFileIdAndBase(addr, nullptr) : -1;
+	unsigned int file_id = 0xFFFFFFFFu;
+	const bool in_reloc_file =
+		portRelocDescribePointer(addr, &fileBase, &fileSize, &file_id, nullptr);
+	portStageAuditNoteVtxDispatch(in_reloc_file ? 1 : 0);
+	const int rt_file_id = in_reloc_file ? (int)file_id : -1;
 	portStageAuditNoteVtxDispatchFile(rt_file_id);
-	if (!in_reloc_file) return 0;
+	if (!in_reloc_file) return addr;
 
-	const uintptr_t target = reinterpret_cast<uintptr_t>(addr);
 	const size_t target_offset = target - fileBase;
 	const size_t total_bytes = (size_t)num_vtx * 16u;
-	if (out_size < total_bytes) return -1;
-	if (target_offset > fileSize || total_bytes > fileSize - target_offset) return -1;
+	if (target_offset > fileSize || total_bytes > fileSize - target_offset) return nullptr;
 
-	std::memcpy(out_vertices, addr, total_bytes);
-	uint32_t *region = reinterpret_cast<uint32_t *>(out_vertices);
+	RuntimeVertexDecodeEntry entry;
+	entry.words.resize(total_bytes / sizeof(uint32_t));
+	entry.file_id = rt_file_id;
+	std::memcpy(entry.words.data(), addr, total_bytes);
+	uint32_t *region = entry.words.data();
 	unsigned int decoded_here = 0;
 	unsigned int already_host = 0;
 	for (unsigned int i = 0; i < num_vtx; i++)
@@ -2584,7 +2742,7 @@ extern "C" int portRelocDecodeVerticesForRuntime(const void *addr, unsigned int 
 		static unsigned int sDecodeTrace = 0;
 		if (sDecodeTrace < 64u)
 		{
-			const int16_t *ob = reinterpret_cast<const int16_t *>(out_vertices);
+				const int16_t *ob = reinterpret_cast<const int16_t *>(entry.words.data());
 			port_log("SSB64: VTX_RUNTIME_DECODE file=%d off=0x%x n=%u decoded=%u prehost=%u post_ob=(%d,%d,%d)\n",
 			         rt_file_id, (unsigned int)target_offset, num_vtx,
 			         decoded_here, already_host,
@@ -2593,6 +2751,21 @@ extern "C" int portRelocDecodeVerticesForRuntime(const void *addr, unsigned int 
 		}
 	}
 
+	auto inserted = sRuntimeVertexDecodeCache.emplace(key, std::move(entry));
+	hot = RuntimeVertexHotEntry{target, num_vtx, inserted.first->second.words.data()};
+	return hot.decoded;
+}
+
+extern "C" int portRelocDecodeVerticesForRuntime(const void *addr, unsigned int num_vtx,
+                                                    void *out_vertices, size_t out_size)
+{
+	if (out_vertices == nullptr) return -1;
+	const size_t total_bytes = (size_t)num_vtx * 16u;
+	if (out_size < total_bytes) return -1;
+	const void *source = portRelocGetDecodedVerticesForRuntime(addr, num_vtx);
+	if (source == nullptr) return -1;
+	if (source == addr) return 0;
+	std::memcpy(out_vertices, source, total_bytes);
 	return 1;
 }
 

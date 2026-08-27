@@ -274,17 +274,74 @@ CXX = $(PREFIX)-g++
 # Override with: make -f Makefile.vita SSB64_SOBJ_TRACE_DETAIL=1 ...
 SSB64_SOBJ_TRACE_DETAIL ?= 0
 
+# Shipping default: compile out continuous Vita profiling/investigation taps
+# from the frame, draw and GBI-command hot paths. Re-enable only when collecting
+# a hardware profile; correctness guards (DL bounds, resource lifetime, VBO
+# allocation failure handling) remain active regardless of this switch.
+# Override with: make -f Makefile.vita SSB64_VITA_RUNTIME_DIAG=1 ...
+SSB64_VITA_RUNTIME_DIAG ?= 0
+
+# Frame-rate experiment #1: disable vitaGL's own vsync wait
+# (sceDisplayWaitVblankStartMulti in gxm.c, gated by vglWaitVblankStart) at
+# init. 0 = vsync on (default, matches shipped behavior). 1 = vsync off,
+# uncapped present rate — measures whether the display-wait itself is the
+# frame-time ceiling versus CPU/GPU work.
+# Override with: make -f Makefile.vita SSB64_VITA_DISABLE_VSYNC=1 ...
+SSB64_VITA_DISABLE_VSYNC ?= 0
+
+# Frame-rate experiment #2: render (Fast3D walk + GPU draw + present) only
+# 1 out of every N task-manager ticks; game logic/audio still tick every
+# frame, since this only gates port_drain_pending_display_list(), not the
+# task manager. 1 = render every tick (default, no skip). 2 = render every
+# other tick. Relies on the existing GFX_PENDING_REPLACE/generation-guard
+# path in port/gameloop.cpp to safely discard a skipped tick's DL.
+# Override with: make -f Makefile.vita SSB64_FRAMESKIP_STRIDE=2 ...
+SSB64_FRAMESKIP_STRIDE ?= 1
+
+# Frame-rate experiment #3: master switch for the per-scene-entry diagnostic
+# stack added for the model-preflight/DL-stitch investigation (TASK_SEAL in
+# decomp/src/sys/taskman.c, FAST3D_SCENE in port/gameloop.cpp,
+# VITA_SCENE_RENDER in libultraship's gfx_opengl.cpp). TASK_SEAL's structural
+# opcode hash walks every command in up to 4 DL buffers (seen up to ~2800
+# commands each) every frame for the first 8 frames of every scene entry —
+# real O(N) CPU cost concentrated right at scene transitions, not "free"
+# logging. Ship with this off; turn it on only for a targeted scene-transition
+# capture.
+# Override with: make -f Makefile.vita SSB64_VITA_SCENE_DIAG=1 ...
+SSB64_VITA_SCENE_DIAG ?= 0
+
+# Low-overhead hardware profiler used while closing the remaining 60 FPS gap.
+# Unlike RUNTIME_DIAG this adds only a few frame-level clocks and emits output
+# when a frame actually misses its budget; no per-command/per-draw counters.
+SSB64_VITA_SLOW_FRAME_DIAG ?= 1
+
+# Triple buffering gives vitaGL one extra display buffer so a frame that
+# narrowly misses vblank does not immediately turn into a visible 30 FPS
+# hitch.  Keep this independently switchable for hardware A/B tests.
+SSB64_VITA_TRIPLE_BUFFERING ?= 1
+
+# Compile spdlog INFO call-sites out of the Vita shipping binary. WARN/ERROR
+# diagnostics remain available; set 2 when an INFO-level resource trace is
+# intentionally required.
+SSB64_VITA_SPDLOG_LEVEL ?= 3
+
 CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-short-enums -fsigned-char -MMD -MP \
 	-DSSB64_SOBJ_TRACE_DETAIL=$(SSB64_SOBJ_TRACE_DETAIL) \
+	-DSSB64_VITA_RUNTIME_DIAG=$(SSB64_VITA_RUNTIME_DIAG) \
+	-DSSB64_VITA_DISABLE_VSYNC=$(SSB64_VITA_DISABLE_VSYNC) \
+	-DSSB64_FRAMESKIP_STRIDE=$(SSB64_FRAMESKIP_STRIDE) \
+	-DSSB64_VITA_SCENE_DIAG=$(SSB64_VITA_SCENE_DIAG) \
+	-DSSB64_VITA_SLOW_FRAME_DIAG=$(SSB64_VITA_SLOW_FRAME_DIAG) \
+	-DSSB64_VITA_TRIPLE_BUFFERING=$(SSB64_VITA_TRIPLE_BUFFERING) \
 	-D__vita__ -DSSB64_VITA_BUILD=1 \
 	-I$(VITAGL_DIR)/source \
 	$(foreach dir,$(INCLUDES),-I$(dir)) -fno-strict-aliasing -DMA_NO_RUNTIME_LINKING \
 	-DNDEBUG \
-	-Wno-narrowing -DIMGUI_IMPL_OPENGL_ES2 -DSPDLOG_ACTIVE_LEVEL=2 -DFMT_HEADER_ONLY \
+	-Wno-narrowing -DIMGUI_IMPL_OPENGL_ES2 -DSPDLOG_ACTIVE_LEVEL=$(SSB64_VITA_SPDLOG_LEVEL) -DFMT_HEADER_ONLY \
 	-I$(VITASDK)/$(PREFIX)/include/SDL2 -DENABLE_OPENGL=1 \
 	-D_LANGUAGE_C -DCIMGUI_DEFINE_ENUMS_AND_STRUCTS \
 	-DAVOID_UB=1 -DF3DEX_GBI_2=1 -DNON_MATCHING=1 -DNON_EQUIVALENT=1 -DPORT=1 -DN_MICRO=1 \
-	-D_USE_MATH_DEFINES -DVERSION_US=1 -DREGION_US=1 -DDISABLE_SCRIPTING=1 \
+	-D_USE_MATH_DEFINES -DVERSION_US=1 -DREGION_US=1 \
 	-DSSB64_APP_NAME=\"BattleShip\" -DSSB64_O2R_NAME=\"BattleShip.o2r\" \
 	-DBATTLESHIP_CURRENT_VERSION=\"1.0.0-vita\" -DSSB64_ASSET_RECIPE_HASH=\"vita-manual-build\" \
 	-DCVAR_VSYNC_ENABLED=\"gVsyncEnabled\" -DCVAR_Z_FIGHTING_MODE=\"gZFightingMode\" \

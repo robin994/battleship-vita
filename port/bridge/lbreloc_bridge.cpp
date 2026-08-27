@@ -195,14 +195,61 @@ static std::vector<PortRelocFileRange> sPortRelocFileRanges;
  */
 static std::atomic<unsigned int> sPortRelocLifetimeGeneration{1u};
 
+/* Reloc pointer classification is a renderer hot path. Fast3D repeatedly asks
+ * about vertices, textures and nested display lists from the same handful of
+ * resources, while the historical helpers linearly scanned every live range
+ * on each query. Keep a tiny positive cache keyed by containment. Entries are
+ * invalidated by the existing lifetime generation whenever a range is
+ * recycled, so a reused heap address can never inherit stale ownership. */
+struct PortRelocLookupCacheEntry
+{
+	PortRelocFileRange range{};
+	unsigned int generation = 0;
+};
+
+static PortRelocLookupCacheEntry sPortRelocLookupCache[8];
+static unsigned int sPortRelocLookupCacheNext = 0;
+
+static bool portRelocLookupRangeCached(uintptr_t addr, PortRelocFileRange *out_range)
+{
+	const unsigned int generation =
+		sPortRelocLifetimeGeneration.load(std::memory_order_acquire);
+
+	for (const auto &entry : sPortRelocLookupCache)
+	{
+		if (entry.generation != generation || entry.range.size == 0)
+			continue;
+		if (addr >= entry.range.base && (addr - entry.range.base) < entry.range.size)
+		{
+			if (out_range != nullptr) *out_range = entry.range;
+			return true;
+		}
+	}
+
+	for (const auto &range : sPortRelocFileRanges)
+	{
+		if (range.size != 0 && addr >= range.base && (addr - range.base) < range.size)
+		{
+			PortRelocLookupCacheEntry &entry =
+				sPortRelocLookupCache[sPortRelocLookupCacheNext++ % 8u];
+			entry.range = range;
+			entry.generation = generation;
+			if (out_range != nullptr) *out_range = range;
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static unsigned int portRelocBumpLifetimeGeneration(const char *reason)
 {
 	const unsigned int generation =
 		sPortRelocLifetimeGeneration.fetch_add(1u, std::memory_order_acq_rel) + 1u;
-#ifdef __vita__
-	port_log("SSB64: RESOURCE_LIFETIME_GENERATION generation=%u reason=%s\n",
-	         generation, reason ? reason : "unknown");
-#else
+	#if defined(__vita__) && defined(SSB64_VITA_RUNTIME_DIAG) && SSB64_VITA_RUNTIME_DIAG
+		port_log("SSB64: RESOURCE_LIFETIME_GENERATION generation=%u reason=%s\n",
+		         generation, reason ? reason : "unknown");
+	#else
 	(void)reason;
 #endif
 	return generation;
@@ -306,12 +353,14 @@ static void portRelocEvictFileRangesInRange(void *base, size_t size)
 	for (const auto &r : sPortRelocFileRanges) {
 		uintptr_t rb = r.base;
 		uintptr_t re = rb + r.size;
-		if ((r.size != 0) && (rb < end) && (begin < re)) {
-			evicted_any = true;
-			port_dl_range_unregister(reinterpret_cast<const void*>(rb));
-			port_log("SSB64: RESOURCE_FREE name=%s address=%p reason=heap-reuse\n",
-			         r.path ? r.path : "(unknown)", reinterpret_cast<void*>(rb));
-		}
+			if ((r.size != 0) && (rb < end) && (begin < re)) {
+				evicted_any = true;
+				port_dl_range_unregister(reinterpret_cast<const void*>(rb));
+	#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
+				port_log("SSB64: RESOURCE_FREE name=%s address=%p reason=heap-reuse\n",
+				         r.path ? r.path : "(unknown)", reinterpret_cast<void*>(rb));
+	#endif
+			}
 	}
 
 	sPortRelocFileRanges.erase(
@@ -586,13 +635,15 @@ static void portRelocEvictForceBatch(uintptr_t heap_base)
 		portTextureCacheDeleteRange(range_base, range.size);
 		portEvictStructFixupsInRange(range_base, range.size);
 		portRelocInvalidateRange(range_base, range.size);
-		portStatusBufferRemoveFile(sLBRelocInternBuffer.force_status_buffer,
-		                           &sLBRelocInternBuffer.force_status_buffer_num,
-		                           range.file_id, range_base);
-		port_dl_range_unregister(range_base);
-		port_log("SSB64: RESOURCE_FREE name=%s address=%p reason=force-rewind\n",
-		         range.path ? range.path : "(unknown)", range_base);
-	}
+			portStatusBufferRemoveFile(sLBRelocInternBuffer.force_status_buffer,
+			                           &sLBRelocInternBuffer.force_status_buffer_num,
+			                           range.file_id, range_base);
+			port_dl_range_unregister(range_base);
+	#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
+			port_log("SSB64: RESOURCE_FREE name=%s address=%p reason=force-rewind\n",
+			         range.path ? range.path : "(unknown)", range_base);
+	#endif
+		}
 
 	sPortRelocFileRanges.erase(
 		std::remove_if(sPortRelocFileRanges.begin(), sPortRelocFileRanges.end(),
@@ -977,13 +1028,15 @@ extern "C" void portRelocLoadFileFromBytes(
 	// below (chain-walk-stop, OOB target, extern overrun) has been
 	// completely invisible on real hardware until now. This entry log is
 	// unconditional (not gated behind SSB64_LOG_LBRELOC_LOAD) so the crash
-	// site's inputs are always captured, not just when that env var happens
-	// to be set for a debug run.
-	port_log("SSB64: RELOC_LOAD_ENTRY file_id=%u path=%s input_bytes=%p input_size=%u "
+		// site's inputs are captured in hardware diagnostic builds without
+		// formatting a line for every animation load in the shipping hot path.
+	#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
+		port_log("SSB64: RELOC_LOAD_ENTRY file_id=%u path=%s input_bytes=%p input_size=%u "
 	         "allocation_raw=%p allocation_result=%p allocation_size=%u reloc_table_offset=%u,%u "
 	         "extern_count=%u data_base=%p\n",
-	         file_id, table_path ? table_path : "(null)", src_bytes, src_size, ram_dst_raw, ram_dst, bytes_num,
-	         (unsigned)reloc_intern_offset, (unsigned)reloc_extern_offset, extern_count, ram_dst);
+		         file_id, table_path ? table_path : "(null)", src_bytes, src_size, ram_dst_raw, ram_dst, bytes_num,
+		         (unsigned)reloc_intern_offset, (unsigned)reloc_extern_offset, extern_count, ram_dst);
+	#endif
 
 	// Gated: SSB64_LOG_LBRELOC_LOAD=1 logs every file load. Helpful when
 	// tracing which reloc files are loaded per scene.
@@ -1075,10 +1128,12 @@ extern "C" void portRelocLoadFileFromBytes(
 	// hands back a vector with stale fileBase/fileSize, segment-0E sub-DL
 	// references resolve to the prior file's address window, and the
 	// interpreter walks garbage — fingerprint of issue #103/#128.
-	portPackedDisplayListCacheDeleteRange(ram_dst, copySize);
-	portRelocEvictFileRangesInRange(ram_dst, copySize);
-	port_log("SSB64: RELOC_MEMCPY_GUARD file_id=%u dst=%p src=%p size=%u allocation_size=%u\n",
-	         file_id, ram_dst, src_bytes, (unsigned)copySize, bytes_num);
+		portPackedDisplayListCacheDeleteRange(ram_dst, copySize);
+		portRelocEvictFileRangesInRange(ram_dst, copySize);
+	#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
+		port_log("SSB64: RELOC_MEMCPY_GUARD file_id=%u dst=%p src=%p size=%u allocation_size=%u\n",
+		         file_id, ram_dst, src_bytes, (unsigned)copySize, bytes_num);
+	#endif
 #ifdef __vita__
 	bool copy_verified = false;
 	for (unsigned int copy_attempt = 1; copy_attempt <= 2; ++copy_attempt)
@@ -1289,8 +1344,9 @@ extern "C" void portRelocLoadFileFromBytes(
 	// extern_file_ids array (as opposed to a bad chain word inside the
 	// file's own data) is visible directly rather than inferred from where
 	// the walk eventually stops.
-	{
-		char extern_ids_buf[192];
+	#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
+		{
+			char extern_ids_buf[192];
 		size_t off = 0;
 		extern_ids_buf[0] = '\0';
 		for (unsigned int i = 0; i < extern_count && off + 8 < sizeof(extern_ids_buf); i++) {
@@ -1299,9 +1355,10 @@ extern "C" void portRelocLoadFileFromBytes(
 				off += (size_t)n;
 			}
 		}
-		port_log("SSB64: RELOC_EXTERN_IDS file_id=%u extern_count=%u ids=%s\n", file_id, extern_count,
-		         extern_ids_buf);
-	}
+			port_log("SSB64: RELOC_EXTERN_IDS file_id=%u extern_count=%u ids=%s\n", file_id, extern_count,
+			         extern_ids_buf);
+		}
+	#endif
 
 	while (reloc_extern != 0xFFFF)
 	{
@@ -1496,16 +1553,18 @@ extern "C" void portRelocLoadFileFromBytes(
 			         preflight_reason ? preflight_reason : "preflight");
 			return;
 		}
-		else
-		{
-			static unsigned int sPreflightPassBudget = 128;
+			else
+			{
+	#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
+				static unsigned int sPreflightPassBudget = 128;
 			if (sPreflightPassBudget > 0)
 			{
 				--sPreflightPassBudget;
 				port_log("SSB64: RESOURCE_PREFLIGHT_PASS file_id=%u slots=%u address=%p\n",
-				         file_id, (unsigned)reloc_slot_offsets.size(), ram_dst);
+					         file_id, (unsigned)reloc_slot_offsets.size(), ram_dst);
+				}
+	#endif
 			}
-		}
 	}
 #endif
 
@@ -1528,14 +1587,16 @@ extern "C" void portRelocLoadFileFromBytes(
 	{
 		const unsigned long long semantic_hash = portRelocSemanticHash(ram_dst, copySize, reloc_slot_offsets);
 		auto baseline_it = sPortRelocSemanticBaselines.find(file_id);
-		if (baseline_it == sPortRelocSemanticBaselines.end() ||
-		    baseline_it->second.source_hash != pristine_source_hash ||
-		    baseline_it->second.size != copySize)
-		{
-			sPortRelocSemanticBaselines[file_id] = { pristine_source_hash, semantic_hash, copySize };
-			port_log("SSB64: RESOURCE_INTEGRITY_BASELINE file_id=%u src=%016llx semantic=%016llx size=%u\n",
-			         file_id, pristine_source_hash, semantic_hash, (unsigned)copySize);
-		}
+			if (baseline_it == sPortRelocSemanticBaselines.end() ||
+			    baseline_it->second.source_hash != pristine_source_hash ||
+			    baseline_it->second.size != copySize)
+			{
+				sPortRelocSemanticBaselines[file_id] = { pristine_source_hash, semantic_hash, copySize };
+		#if !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
+				port_log("SSB64: RESOURCE_INTEGRITY_BASELINE file_id=%u src=%016llx semantic=%016llx size=%u\n",
+				         file_id, pristine_source_hash, semantic_hash, (unsigned)copySize);
+		#endif
+			}
 		else if (baseline_it->second.semantic_hash != semantic_hash)
 		{
 			port_log("SSB64: RESOURCE_INTEGRITY_MISMATCH file_id=%u expected=%016llx got=%016llx retry_depth=%d action=%s\n",
@@ -1583,13 +1644,15 @@ extern "C" void portRelocLoadFileFromBytes(
 			break;
 		}
 	}
-	port_log("SSB64: RESOURCE_TRANSACTION_COMMIT file_id=%u address=%p state=READY\n",
-	         file_id, ram_dst);
+	#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
+		port_log("SSB64: RESOURCE_TRANSACTION_COMMIT file_id=%u address=%p state=READY\n",
+		         file_id, ram_dst);
 
-	port_log("SSB64: RESOURCE_LOAD name=%s size=%u address=%p reloc_count=%u status=READY deps=%u\n",
-	         table_path ? table_path : "(mod)", (unsigned)copySize, ram_dst,
-	         (unsigned)(intern_steps + extern_steps), extern_count);
-}
+		port_log("SSB64: RESOURCE_LOAD name=%s size=%u address=%p reloc_count=%u status=READY deps=%u\n",
+		         table_path ? table_path : "(mod)", (unsigned)copySize, ram_dst,
+		         (unsigned)(intern_steps + extern_steps), extern_count);
+	#endif
+	}
 
 /**
  * Mod-private variant of portRelocLoadFileFromBytes: copies src_bytes
@@ -2046,26 +2109,11 @@ size_t lbRelocGetAllocSize(u32 *ids, u32 len)
 bool portRelocFindContainingFile(const void *ptr, uintptr_t *out_base, size_t *out_size)
 {
 	uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-
-	for (const auto &range : sPortRelocFileRanges)
-	{
-		uintptr_t start = range.base;
-		size_t size = range.size;
-
-		if ((addr >= start) && (size != 0) && ((addr - start) < size))
-		{
-			if (out_base != NULL)
-			{
-				*out_base = start;
-			}
-			if (out_size != NULL)
-			{
-				*out_size = size;
-			}
-			return TRUE;
-		}
-	}
-	return FALSE;
+	PortRelocFileRange range{};
+	if (!portRelocLookupRangeCached(addr, &range)) return FALSE;
+	if (out_base != NULL) *out_base = range.base;
+	if (out_size != NULL) *out_size = range.size;
+	return TRUE;
 }
 
 int portRelocGetContainingFileBounds(const void *ptr, uintptr_t *out_base, size_t *out_size)
@@ -2078,15 +2126,10 @@ int portRelocGetContainingFileBounds(const void *ptr, uintptr_t *out_base, size_
 extern "C" int portRelocFindFileIdAndBase(const void *ptr, uintptr_t *out_base)
 {
 	uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-	for (const auto &range : sPortRelocFileRanges)
-	{
-		if ((addr >= range.base) && (range.size != 0) && ((addr - range.base) < range.size))
-		{
-			if (out_base != nullptr) *out_base = range.base;
-			return (int)range.file_id;
-		}
-	}
-	return -1;
+	PortRelocFileRange range{};
+	if (!portRelocLookupRangeCached(addr, &range)) return -1;
+	if (out_base != nullptr) *out_base = range.base;
+	return (int)range.file_id;
 }
 
 /* Classify a pointer for diagnostic output. Writes a short human-readable
@@ -2167,34 +2210,13 @@ void *portRelocResolveArrayEntry(const void *array_ptr, unsigned int index)
 bool portRelocDescribePointer(const void *ptr, uintptr_t *out_base, size_t *out_size, u32 *out_file_id, const char **out_path)
 {
 	uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-
-	for (const auto &range : sPortRelocFileRanges)
-	{
-		uintptr_t start = range.base;
-		size_t size = range.size;
-
-		if ((addr >= start) && (size != 0) && ((addr - start) < size))
-		{
-			if (out_base != NULL)
-			{
-				*out_base = start;
-			}
-			if (out_size != NULL)
-			{
-				*out_size = size;
-			}
-			if (out_file_id != NULL)
-			{
-				*out_file_id = range.file_id;
-			}
-			if (out_path != NULL)
-			{
-				*out_path = range.path;
-			}
-			return TRUE;
-		}
-	}
-	return FALSE;
+	PortRelocFileRange range{};
+	if (!portRelocLookupRangeCached(addr, &range)) return FALSE;
+	if (out_base != NULL) *out_base = range.base;
+	if (out_size != NULL) *out_size = range.size;
+	if (out_file_id != NULL) *out_file_id = range.file_id;
+	if (out_path != NULL) *out_path = range.path;
+	return TRUE;
 }
 
 // // // // // // // // // // // //

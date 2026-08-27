@@ -278,6 +278,11 @@ int portRelocNormalizeVerticesForTypedConsumer(const void *addr,
  */
 void portRelocFixupVertexAtRuntime(const void *addr, unsigned int num_vtx);
 
+/** Return a stable host-order view for a Vita reloc-backed Vtx range.
+ * Non-reloc/native vertex arrays are returned unchanged; NULL means the
+ * reloc-backed request failed bounds validation. */
+const void *portRelocGetDecodedVerticesForRuntime(const void *addr, unsigned int num_vtx);
+
 /**
  * Decode reloc-backed Vtx data into a caller-provided host-order buffer.
  *
@@ -320,6 +325,14 @@ void portRelocFixupTextureAtRuntime(const void *addr, unsigned int num_bytes);
  * Copies are invalidated with their source range before scene-heap reuse.
  */
 const void *portRelocDecodeTextureForRuntime(const void *addr, unsigned int num_bytes);
+
+/**
+ * True when [addr, addr + num_bytes) is backed by the immutable renderer-owned
+ * decode cache. These ranges are explicitly evicted from Fast3D's GPU texture
+ * cache before their storage is released, so cache hits do not need to hash
+ * the texel bytes again merely to detect pointer reuse.
+ */
+int portRelocIsStableDecodedTextureRange(const void *addr, unsigned int num_bytes);
 
 /**
  * Texture-fixup diagnostic logging.

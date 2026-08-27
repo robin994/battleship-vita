@@ -21,12 +21,29 @@ u8 port_diag_get_scene_prev(void)
 
 u8 port_diag_get_stage_kind(void)
 {
+	if (gSCManagerBattleState != NULL)
+		return gSCManagerBattleState->gkind;
 	return gSCManagerSceneData.gkind;
 }
 
 u32 port_diag_get_task_frame_count(void)
 {
 	return dSYTaskmanFrameCount;
+}
+
+u32 port_diag_get_active_fighter_count(void)
+{
+	u32 count = 0;
+	u32 i;
+
+	if (gSCManagerBattleState == NULL)
+		return 0;
+	for (i = 0; i < GMCOMMON_PLAYERS_MAX; ++i)
+	{
+		if (gSCManagerBattleState->players[i].fighter_gobj != NULL)
+			++count;
+	}
+	return count;
 }
 
 const char *port_diag_get_scene_name(u8 id)

@@ -44,10 +44,13 @@ struct Entry {
  * original locked scan, preserving exact classification behavior. */
 std::vector<Entry> sRanges;
 std::mutex sRangesMtx;
-std::atomic<uint64_t> sRangesGen{0};
+/* 32 bits are more than enough for a mutation counter (scene/resource range
+ * changes are rare). Vita is ARMv7, so keeping the once-per-GBI-command
+ * relaxed load at native word width avoids the heavier 64-bit atomic path. */
+std::atomic<uint32_t> sRangesGen{0};
 
 struct HitCache {
-    uint64_t gen = ~0ull;   /* generation this cache entry was validated at */
+    uint32_t gen = ~0u;     /* generation this cache entry was validated at */
     uintptr_t base = 0;
     size_t size = 0;
 };
@@ -102,7 +105,12 @@ extern "C" int port_dl_check_addr(uintptr_t addr) {
      * case with no mutex and no scan. Only valid while the registry hasn't
      * changed (generation match); any register/unregister bumps the gen
      * and forces a re-validation through the locked scan below. */
-    const uint64_t gen = sRangesGen.load(std::memory_order_acquire);
+    /* The cached range itself is thread-local and was copied while holding
+     * sRangesMtx.  Here the generation is only an invalidation token; the
+     * slow path takes the mutex before reading shared range data.  An acquire
+     * load therefore buys no ordering but does emit an ARM barrier in this
+     * per-GBI-command hot path on Vita. */
+    const uint32_t gen = sRangesGen.load(std::memory_order_relaxed);
     {
         const HitCache c = sHitCache;
         if (c.gen == gen && c.size != 0 &&

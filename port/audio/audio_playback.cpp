@@ -37,6 +37,7 @@ static constexpr int32_t MAX_SAMPLES_STEREO = SAMPLES_PER_FRAME_HIGH * 2;
 static int16_t sSilenceBuf[MAX_SAMPLES_STEREO];
 static bool    sInitialized = false;
 
+#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
 struct AudioDiagnostics {
     uint32_t bufferRequests = 0;
     uint32_t underruns = 0;
@@ -57,10 +58,15 @@ struct AudioDiagnostics {
 };
 
 static AudioDiagnostics sAudioDiagnostics;
+#endif
 
 extern "C" void portAudioRecordMixTime(unsigned int mixTimeUs)
 {
+#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
     sAudioDiagnostics.pendingMixTimeUs = mixTimeUs;
+#else
+    (void)mixTimeUs;
+#endif
 }
 
 extern "C" void portAudioPushSilence(void)
@@ -237,6 +243,7 @@ extern "C" void portAudioSubmitFrame(const void *buf, int sampleCount)
         return;
     }
 
+#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
     const auto submitStart = std::chrono::steady_clock::now();
     const int32_t bufferedBefore = AudioPlayerBuffered();
     AudioDiagnostics& diag = sAudioDiagnostics;
@@ -258,6 +265,7 @@ extern "C" void portAudioSubmitFrame(const void *buf, int sampleCount)
     if (bufferedBefore > diag.bufferedBeforeMax) diag.bufferedBeforeMax = bufferedBefore;
     diag.mixTimeUsTotal += diag.pendingMixTimeUs;
     if (diag.pendingMixTimeUs > diag.mixTimeUsMax) diag.mixTimeUsMax = diag.pendingMixTimeUs;
+#endif
 
     // n_alAudioFrame produces interleaved stereo s16 PCM.
     // Total bytes = sampleCount * 2 channels * 2 bytes per sample.
@@ -291,6 +299,7 @@ extern "C" void portAudioSubmitFrame(const void *buf, int sampleCount)
 
     AudioPlayerPlayFrame(reinterpret_cast<const uint8_t*>(pcm), byteLen);
 
+#if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
     diag.bufferedAfter = AudioPlayerBuffered();
     const auto submitTimeUs = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - submitStart).count();
@@ -317,4 +326,5 @@ extern "C" void portAudioSubmitFrame(const void *buf, int sampleCount)
         diag.previousSubmit = previousSubmit;
         diag.hasPreviousSubmit = true;
     }
+#endif
 }

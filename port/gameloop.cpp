@@ -45,6 +45,10 @@
 #include <exception>
 #include <typeinfo>
 
+#if defined(__vita__) && defined(SSB64_VITA_SLOW_FRAME_DIAG) && SSB64_VITA_SLOW_FRAME_DIAG
+#include <vitasdk.h>
+#endif
+
 /* GBI trace system */
 #include "../debug_tools/gbi_trace/gbi_trace.h"
 
@@ -71,6 +75,35 @@ extern "C" void port_vi_simulate_vblank(void);
  * captured in generation N must never be consumed after the heap advances to
  * generation N+1, even if the numeric address has been reused. */
 extern "C" unsigned int portRelocGetLifetimeGeneration(void);
+
+#if defined(__vita__) && defined(SSB64_VITA_SLOW_FRAME_DIAG) && SSB64_VITA_SLOW_FRAME_DIAG
+extern "C" uint32_t port_vita_get_last_pace_us(void);
+extern "C" uint32_t port_vita_get_last_swap_us(void);
+extern "C" uint32_t port_vita_get_last_gui_start_us(void);
+extern "C" uint32_t port_vita_get_last_interpreter_start_us(void);
+extern "C" uint32_t port_vita_get_last_interpreter_run_us(void);
+extern "C" uint32_t port_vita_get_last_gui_end_us(void);
+extern "C" uint32_t port_vita_get_last_interpreter_end_us(void);
+extern "C" uint32_t port_vita_get_last_fast3d_commands(void);
+extern "C" uint32_t port_vita_get_last_fast3d_flushes(void);
+extern "C" uint32_t port_vita_get_last_fast3d_tris(void);
+extern "C" unsigned char port_diag_get_scene_curr(void);
+extern "C" unsigned char port_diag_get_stage_kind(void);
+extern "C" unsigned int port_diag_get_task_frame_count(void);
+extern "C" unsigned int port_diag_get_active_fighter_count(void);
+
+static uint32_t sVitaFrameDrawUs = 0;
+static uint32_t sVitaFramePaceUs = 0;
+static uint32_t sVitaFrameSwapUs = 0;
+static uint32_t sVitaFrameGuiStartUs = 0;
+static uint32_t sVitaFrameInterpreterStartUs = 0;
+static uint32_t sVitaFrameInterpreterRunUs = 0;
+static uint32_t sVitaFrameGuiEndUs = 0;
+static uint32_t sVitaFrameInterpreterEndCpuUs = 0;
+static uint32_t sVitaFrameCommands = 0;
+static uint32_t sVitaFrameFlushes = 0;
+static uint32_t sVitaFrameTris = 0;
+#endif
 
 extern "C" void lbBackupApplyCheats(void);
 extern "C" uint32_t portSObjTakeFrameBitmapDraws(void);
@@ -203,12 +236,15 @@ static int sLastDLRectPx = 0;
 static int sLastDLLoadBytes = 0;
 static int sLastDLCommands = 0;
 static float sLastDLTriAreaPx = 0.0f;
+static int sGbiTraceLoggingThisDL = 0;
 
 /* Thin C wrapper for the trace callback (matches GbiTraceCallbackFn signature) */
 static void gbi_trace_callback(uintptr_t w0, uintptr_t w1, int dl_depth)
 {
 	sFrameCommandCount++;
-	gbi_trace_log_cmd((unsigned long long)w0, (unsigned long long)w1, dl_depth);
+	if (sGbiTraceLoggingThisDL) {
+		gbi_trace_log_cmd((unsigned long long)w0, (unsigned long long)w1, dl_depth);
+	}
 
 	uint8_t opcode = (uint8_t)((w0 >> 24) & 0xFFu);
 	switch (opcode) {
@@ -446,6 +482,18 @@ extern "C" void port_drain_pending_display_list(void);
  * Dropping the next N submitted DLs reproduces the held-frame behavior. */
 static int sSimLoadStallFrames = 0;
 
+#if defined(__vita__) && defined(SSB64_FRAMESKIP_STRIDE) && (SSB64_FRAMESKIP_STRIDE > 1)
+/* Frame-rate experiment: render (Fast3D walk + GPU draw + present) only
+ * 1 out of every SSB64_FRAMESKIP_STRIDE task-manager ticks. Game logic and
+ * audio are driven by the task manager, not by this call, so skipped ticks
+ * don't slow the simulation down — they just leave sPendingDisplayList set
+ * instead of draining it. The next real tick's port_submit_display_list()
+ * either drains it late (still one tick behind, harmless) or, if a newer DL
+ * has already replaced it, the existing GFX_PENDING_REPLACE/generation-guard
+ * path in port_drain_pending_display_list() discards the skipped one safely. */
+static int sFrameSkipCounter = 0;
+#endif
+
 extern "C" int port_get_frame_count(void)
 {
 	return sFrameCount;
@@ -473,13 +521,10 @@ extern "C" void port_submit_display_list(void *dl)
 		sSimLoadStallFrames--;
 		return;
 	}
-	/* Lazy-init the GBI trace system on first DL submit. Always install
-	 * the callback because Phase 3's per-DL cost model also runs through
-	 * it — gbi_trace_log_cmd is the no-op fast path when tracing is off. */
+	/* Lazy-init the GBI trace system on first DL submit. */
 	if (!sGbiTraceInitDone) {
 		sGbiTraceInitDone = 1;
 		gbi_trace_init();
-		gfx_set_trace_callback(gbi_trace_callback);
 	}
 
 	/* Reset per-DL accumulators before Fast3D walks the DL. */
@@ -520,7 +565,13 @@ extern "C" void port_submit_display_list(void *dl)
 	 * transition free/reuse those heaps before Fast3D sees the commands.
 	 */
 	gbi_trace_set_vi_frame(sFrameCount + 1);
+#if defined(SSB64_FRAMESKIP_STRIDE) && (SSB64_FRAMESKIP_STRIDE > 1)
+	if ((sFrameSkipCounter++ % SSB64_FRAMESKIP_STRIDE) == 0) {
+		port_drain_pending_display_list();
+	}
+#else
 	port_drain_pending_display_list();
+#endif
 #endif
 }
 
@@ -568,6 +619,26 @@ extern "C" void port_drain_pending_display_list(void)
 	sPendingDisplayList = nullptr;
 	sPendingDisplayListGeneration = 0u;
 
+#if defined(__vita__)
+	/* The synthetic RCP cost model is intentionally disabled for normal
+	 * gameplay (port_scene_wants_freeze_simulation() allowlists only authored
+	 * cutscene/opening freezes). Do not still pay a callback + opcode switch
+	 * for every Fast3D command in those gameplay scenes. Hardware traces keep
+	 * the callback when explicitly enabled. */
+	{
+		extern unsigned char port_diag_get_scene_curr(void);
+		extern int port_scene_wants_freeze_simulation(unsigned char scene_id);
+		const int trace_enabled = gbi_trace_is_enabled() != 0;
+		const int cost_enabled = port_scene_wants_freeze_simulation(port_diag_get_scene_curr()) != 0;
+
+		sGbiTraceLoggingThisDL = trace_enabled;
+		gfx_set_trace_callback((trace_enabled || cost_enabled) ? gbi_trace_callback : nullptr);
+	}
+#else
+	sGbiTraceLoggingThisDL = gbi_trace_is_enabled() != 0;
+	gfx_set_trace_callback(gbi_trace_callback);
+#endif
+
 	gbi_trace_begin_frame();
 
 	/* Enhanced framerate mode: render this tick's DL as `subframes` paced
@@ -577,18 +648,40 @@ extern "C" void port_drain_pending_display_list(void)
 	 * SetTargetFps(60*k), so the whole tick still occupies one VI period and
 	 * the 60 Hz game clock is untouched. subframes == 1 when the feature is
 	 * off, reproducing the old single-call behavior exactly. */
-	int subframes = portInterpActiveSubframes();
-	portInterpBeginDraw();
-	bool costLatched = false;
-	for (int sub = 1; sub <= subframes; sub++) {
+		int subframes = portInterpActiveSubframes();
+		portInterpBeginDraw();
+		bool costLatched = false;
+		for (int sub = 1; sub <= subframes; sub++) {
 		/* Reset per run so the RCP cost model sees one DL walk, not k. */
 		sFrameTriCount = 0;
 		sFrameRectPx = 0;
-		sFrameLoadBytes = 0;
-		sFrameCommandCount = 0;
-		try {
-			window->DrawAndRunGraphicsCommands(dl, portInterpGetReplacements(sub, subframes));
-		} catch (long hr) {
+			sFrameLoadBytes = 0;
+			sFrameCommandCount = 0;
+			try {
+	#if defined(__vita__) && defined(SSB64_VITA_SLOW_FRAME_DIAG) && SSB64_VITA_SLOW_FRAME_DIAG
+				const uint32_t vitaDrawStartUs = sceKernelGetProcessTimeLow();
+	#endif
+				const bool didDraw = window->DrawAndRunGraphicsCommands(dl, portInterpGetReplacements(sub, subframes));
+	#if defined(__vita__) && defined(SSB64_VITA_SLOW_FRAME_DIAG) && SSB64_VITA_SLOW_FRAME_DIAG
+				if (didDraw) {
+					const uint32_t drawUs = sceKernelGetProcessTimeLow() - vitaDrawStartUs;
+					const uint32_t paceUs = port_vita_get_last_pace_us();
+					const uint32_t swapUs = port_vita_get_last_swap_us();
+					const uint32_t endUs = port_vita_get_last_interpreter_end_us();
+					sVitaFrameDrawUs += drawUs;
+					sVitaFramePaceUs += paceUs;
+					sVitaFrameSwapUs += swapUs;
+					sVitaFrameGuiStartUs += port_vita_get_last_gui_start_us();
+					sVitaFrameInterpreterStartUs += port_vita_get_last_interpreter_start_us();
+					sVitaFrameInterpreterRunUs += port_vita_get_last_interpreter_run_us();
+					sVitaFrameGuiEndUs += port_vita_get_last_gui_end_us();
+					sVitaFrameInterpreterEndCpuUs += (endUs > paceUs + swapUs) ? (endUs - paceUs - swapUs) : 0u;
+					sVitaFrameCommands += port_vita_get_last_fast3d_commands();
+					sVitaFrameFlushes += port_vita_get_last_fast3d_flushes();
+					sVitaFrameTris += port_vita_get_last_fast3d_tris();
+				}
+	#endif
+			} catch (long hr) {
 			port_log("SSB64: CAUGHT DX shader exception HRESULT=0x%08lX\n", hr);
 			portInterpEndDraw();
 			gbi_trace_end_frame();
@@ -614,10 +707,10 @@ extern "C" void port_drain_pending_display_list(void)
 				sLastDLTriAreaPx = gfx_get_frame_tri_area_px();
 			}
 		}
-	}
-	portInterpEndDraw();
+		}
+		portInterpEndDraw();
 
-#if defined(__vita__)
+#if defined(__vita__) && (!defined(SSB64_VITA_SCENE_DIAG) || SSB64_VITA_SCENE_DIAG)
 	{
 		extern unsigned char port_diag_get_scene_curr(void);
 		extern unsigned char port_diag_get_stage_kind(void);
@@ -783,8 +876,11 @@ static void port_screenshot_maybe_capture(int frame)
 
 void PortPushFrame(void)
 {
-	// Process cheats safely before the frame updates
-	lbBackupApplyCheats();
+		// Process cheats safely before the frame updates
+		lbBackupApplyCheats();
+	#if defined(__vita__) && defined(SSB64_VITA_SLOW_FRAME_DIAG) && SSB64_VITA_SLOW_FRAME_DIAG
+		const uint32_t vitaFrameStartUs = sceKernelGetProcessTimeLow();
+	#endif
 
 	/* Capture the wall-clock start of this PortPushFrame for the
 	 * frame-pacing fallback below. */
@@ -862,7 +958,8 @@ void PortPushFrame(void)
 	 * deferral is a no-op behavior change — same one DL per frame, same
 	 * order relative to vblank rotation. */
 	gbi_trace_set_vi_frame(sFrameCount + 1);
-#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__ANDROID__)
+	#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__ANDROID__) && \
+		(!defined(__vita__) || (defined(SSB64_VITA_RUNTIME_DIAG) && SSB64_VITA_RUNTIME_DIAG))
 	/* SSB64_DUMP_DRAWS=<vi frame>: snapshot the draw target after every
 	 * DrawTriangles call while rendering that frame (GL backend only).
 	 * Output: draw_dump/draw_NNNN.png relative to CWD. */
@@ -888,12 +985,15 @@ void PortPushFrame(void)
 		gPortGLDumpDraws = (vi >= sDumpDrawsFirst && vi <= sDumpDrawsLast) ? vi : 0;
 	}
 #endif
-	/* One aggregate sample per VI is cheap enough for release hardware and
-	 * lets the Vita log separate display-list rendering from the rest of the
-	 * game tick without reintroducing per-draw diagnostics. */
-	auto dlStart = std::chrono::steady_clock::now();
-	port_drain_pending_display_list();
-	auto dlEnd = std::chrono::steady_clock::now();
+	#if defined(__vita__) && defined(SSB64_VITA_RUNTIME_DIAG) && SSB64_VITA_RUNTIME_DIAG
+		/* Hardware profiling only. Keep the steady-clock taps out of the ship
+		 * path; the renderer itself is identical with diagnostics disabled. */
+		auto dlStart = std::chrono::steady_clock::now();
+	#endif
+		port_drain_pending_display_list();
+	#if defined(__vita__) && defined(SSB64_VITA_RUNTIME_DIAG) && SSB64_VITA_RUNTIME_DIAG
+		auto dlEnd = std::chrono::steady_clock::now();
+	#endif
 
 	/* TCC mod hook: GamePostUpdateEvent fires once per frame AFTER game
 	 * logic + GFX submission. Most common subscription point — game state
@@ -953,20 +1053,69 @@ void PortPushFrame(void)
 		}
 	}
 
-#ifdef __vita__
-	const bool vitaHadDisplayList = (sDLSubmitsThisFrame != 0);
-#endif
-	sDLSubmitsThisFrame = 0;
+		#if defined(__vita__) && defined(SSB64_VITA_RUNTIME_DIAG) && SSB64_VITA_RUNTIME_DIAG
+			const bool vitaHadDisplayList = (sDLSubmitsThisFrame != 0);
+		#endif
 
-	/* Feed the interpolation auto-throttle the wall duration of this tick;
+		/* Feed the interpolation auto-throttle the wall duration of this tick;
 	 * if the host cannot sustain 60 ticks/s at the configured subframe
 	 * count, it steps the render rate down to protect the game clock. */
 	auto frameEnd = std::chrono::steady_clock::now();
-	const auto frameDurationUs = std::chrono::duration_cast<std::chrono::microseconds>(
-		frameEnd - frameStart).count();
-	portInterpNoteTicDuration(frameDurationUs);
+		const auto frameDurationUs = std::chrono::duration_cast<std::chrono::microseconds>(
+			frameEnd - frameStart).count();
+		portInterpNoteTicDuration(frameDurationUs);
 
-#ifdef __vita__
+	#if defined(__vita__) && defined(SSB64_VITA_SLOW_FRAME_DIAG) && SSB64_VITA_SLOW_FRAME_DIAG
+		{
+			const uint32_t vitaFrameUs = sceKernelGetProcessTimeLow() - vitaFrameStartUs;
+			const uint32_t submits = (uint32_t)sDLSubmitsThisFrame;
+				const uint32_t otherUs = (vitaFrameUs > sVitaFrameDrawUs) ? (vitaFrameUs - sVitaFrameDrawUs) : 0u;
+				static uint32_t sVitaSlowLogCount = 0;
+				static uint32_t sVitaLastSlowFrame = 0;
+				static uint32_t sVitaSlowScene = 0xFFFFFFFFu;
+				static uint32_t sVitaSlowStage = 0xFFFFFFFFu;
+				static uint32_t sVitaSlowFighters = 0xFFFFFFFFu;
+				const uint32_t slowScene = (uint32_t)port_diag_get_scene_curr();
+				const uint32_t slowStage = (uint32_t)port_diag_get_stage_kind();
+				const uint32_t slowFighters = port_diag_get_active_fighter_count();
+				if (slowScene != sVitaSlowScene || slowStage != sVitaSlowStage || slowFighters != sVitaSlowFighters) {
+					sVitaSlowScene = slowScene;
+					sVitaSlowStage = slowStage;
+					sVitaSlowFighters = slowFighters;
+					sVitaSlowLogCount = 0;
+					sVitaLastSlowFrame = 0;
+				}
+				const bool slow = vitaFrameUs >= 17500u || sVitaFrameDrawUs >= 16500u || sVitaFrameSwapUs >= 10000u;
+				if (slow && sVitaSlowLogCount < 48u &&
+				    (sVitaSlowLogCount < 6u || (uint32_t)sFrameCount - sVitaLastSlowFrame >= 30u)) {
+					sVitaLastSlowFrame = (uint32_t)sFrameCount;
+					++sVitaSlowLogCount;
+				port_log("SSB64: SLOW_FRAME scene=%u stage=%u fighters=%u task_frame=%u submits=%u "
+				         "frame_us=%u draw_us=%u other_us=%u run_us=%u gui_start_us=%u setup_us=%u "
+				         "gui_end_us=%u end_cpu_us=%u pace_us=%u swap_us=%u commands=%u flushes=%u tris=%u\n",
+					         slowScene, slowStage, slowFighters, port_diag_get_task_frame_count(), submits,
+				         vitaFrameUs, sVitaFrameDrawUs, otherUs, sVitaFrameInterpreterRunUs,
+				         sVitaFrameGuiStartUs, sVitaFrameInterpreterStartUs, sVitaFrameGuiEndUs,
+				         sVitaFrameInterpreterEndCpuUs, sVitaFramePaceUs, sVitaFrameSwapUs,
+				         sVitaFrameCommands, sVitaFrameFlushes, sVitaFrameTris);
+			}
+
+			sVitaFrameDrawUs = 0;
+			sVitaFramePaceUs = 0;
+			sVitaFrameSwapUs = 0;
+			sVitaFrameGuiStartUs = 0;
+			sVitaFrameInterpreterStartUs = 0;
+			sVitaFrameInterpreterRunUs = 0;
+			sVitaFrameGuiEndUs = 0;
+			sVitaFrameInterpreterEndCpuUs = 0;
+			sVitaFrameCommands = 0;
+			sVitaFrameFlushes = 0;
+			sVitaFrameTris = 0;
+		}
+	#endif
+		sDLSubmitsThisFrame = 0;
+
+	#if defined(__vita__) && defined(SSB64_VITA_RUNTIME_DIAG) && SSB64_VITA_RUNTIME_DIAG
 	/* Report one compact line per 300 VI frames. fps_x100 is fixed point
 	 * (e.g. 5994 = 59.94 FPS); dl_us covers Fast3D, GUI and presentation for
 	 * frames that submitted a display list. The separate backend line times
