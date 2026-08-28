@@ -31,7 +31,11 @@
 #include "resource/RelocFile.h"
 #include "resource/RelocFileTable.h"
 #include "resource/RelocPointerTable.h"
+#include "resource/ModRelocRegistry.h"
 #include "bridge/lbreloc_byteswap.h"
+#ifdef __vita__
+#include "mods/VitaModLoader.h"
+#endif
 
 extern "C" void port_aobj_register_halfswapped_range(void *base, unsigned long size);
 // Forward-declared here (rather than at each call site) because this
@@ -424,6 +428,23 @@ static void portStatusBufferRemoveFile(LBFileNode *entries, s32 *p_num,
 	}
 }
 
+static void portStatusBufferRemoveFileId(LBFileNode *entries, s32 *p_num, u32 id)
+{
+	if (entries == nullptr || p_num == nullptr) return;
+	for (s32 i = 0; i < *p_num;)
+	{
+		if (entries[i].id == id)
+		{
+			entries[i] = entries[*p_num - 1];
+			(*p_num)--;
+		}
+		else
+		{
+			i++;
+		}
+	}
+}
+
 static void portRelocRetractPublication(u32 file_id, void *ram_dst, size_t size, int loc)
 {
 	if (loc == nLBFileLocationForce)
@@ -469,6 +490,17 @@ static const PortRelocFileRange *portRelocFindFileRangeAnyState(u32 file_id, con
 	return nullptr;
 }
 
+/* Smash Remix occasionally relies on the original N64 reloc allocator's
+ * contiguous dependency layout: an extern relocation is expressed relative
+ * to dependency A's base, but the target itself lives in a recursively loaded
+ * dependency immediately following A in the same heap. The stock N64 loader
+ * permits this because it simply performs base + words_num * 4.
+ *
+ * Keep the Vita safety check, but validate the computed address against any
+ * fully-published reloc range instead of requiring it to stay inside the
+ * first dependency's own decompressed byte span. This preserves the Remix
+ * closure semantics while still rejecting pointers into padding/unregistered
+ * memory or partially-loaded resources. */
 #ifdef __vita__
 /*
  * Strict transaction preflight.  The loader already validates chain indexes
@@ -735,6 +767,26 @@ extern "C" void port_taskman_evict_arena_caches(const void *base, size_t size)
 	}
 }
 
+static const char *portRelocGetResourcePath(u32 file_id, uint32_t *out_flags = nullptr,
+                                            bool *out_is_mod = nullptr,
+                                            uint32_t *out_owner = nullptr)
+{
+	ssb64::mods::ModRelocResourceView mod_resource{};
+	if (ssb64::mods::FindModRelocResource(file_id, &mod_resource))
+	{
+		if (out_flags != nullptr) *out_flags = mod_resource.flags;
+		if (out_is_mod != nullptr) *out_is_mod = true;
+		if (out_owner != nullptr) *out_owner = mod_resource.owner;
+		return mod_resource.path;
+	}
+
+	if (out_flags != nullptr) *out_flags = 0;
+	if (out_is_mod != nullptr) *out_is_mod = false;
+	if (out_owner != nullptr) *out_owner = 0;
+	if (file_id >= RELOC_FILE_COUNT || gRelocFileTable[file_id] == NULL) return nullptr;
+	return gRelocFileTable[file_id];
+}
+
 static bool portRelocIsFighterFigatreeFile(u32 file_id)
 {
 	static const char sFighterAnimPrefix[] = "reloc_animations/FT";
@@ -749,8 +801,11 @@ static bool portRelocIsFighterFigatreeFile(u32 file_id)
 	 * tutorial's button scripting. */
 	static const char sSCExplainMainPath[] = "reloc_scene/SCExplainMain";
 
-	if (file_id >= RELOC_FILE_COUNT || gRelocFileTable[file_id] == NULL) return false;
-	const char *path = gRelocFileTable[file_id];
+	uint32_t flags = 0;
+	bool is_mod = false;
+	const char *path = portRelocGetResourcePath(file_id, &flags, &is_mod);
+	if (path == nullptr) return false;
+	if (is_mod && (flags & ssb64::mods::MOD_RELOC_FIGHTER_FIGATREE) != 0) return true;
 	return (std::strncmp(path, sFighterAnimPrefix, sizeof(sFighterAnimPrefix) - 1) == 0) ||
 	       (std::strncmp(path, sFighterSubmotionPrefix, sizeof(sFighterSubmotionPrefix) - 1) == 0) ||
 	       (std::strcmp(path, sSCExplainMainPath) == 0);
@@ -790,7 +845,10 @@ static void portRelocFixupFighterFigatree(void *ram_dst, size_t copy_size, const
 
 static std::shared_ptr<RelocFile> portLoadRelocResource(u32 file_id)
 {
-	if (file_id >= RELOC_FILE_COUNT || gRelocFileTable[file_id] == NULL)
+	bool is_mod_resource = false;
+	uint32_t mod_owner = 0;
+	const char *resource_path = portRelocGetResourcePath(file_id, nullptr, &is_mod_resource, &mod_owner);
+	if (resource_path == nullptr)
 	{
 		spdlog::error("lbReloc bridge: invalid file_id {} (0x{:08X})", file_id, file_id);
 		return nullptr;
@@ -803,11 +861,32 @@ static std::shared_ptr<RelocFile> portLoadRelocResource(u32 file_id)
 		return nullptr;
 	}
 
-	std::string path(gRelocFileTable[file_id]);
-	auto resource = ctx->GetResourceManager()->LoadResource(path);
+	std::string path(resource_path);
+	std::shared_ptr<Ship::IResource> resource;
+#ifdef __vita__
+	if (is_mod_resource && mod_owner != 0)
+	{
+		resource = ssb64::mods::VitaModLoader::LoadOwnedResource(mod_owner, path);
+	}
+	else
+#endif
+	{
+		resource = ctx->GetResourceManager()->LoadResource(path);
+	}
 
 	if (!resource)
 	{
+		/* A native mod resource is optional third-party content. Its failure
+		 * must never trigger the base BattleShip.o2r stale-archive fatal path. */
+		if (is_mod_resource)
+		{
+			port_log("SSB64: MOD_RELOC_LOAD status=FAIL file_id=%u path=%s\n",
+			         file_id, path.c_str());
+			spdlog::error("lbReloc bridge: failed to load mod reloc '{}' (file_id={})",
+			              path, file_id);
+			return nullptr;
+		}
+
 		/* Catch the "stale BattleShip.o2r" failure mode visibly before the
 		 * caller dereferences this NULL and SIGSEGVs deep in portFixupSprite.
 		 *
@@ -886,8 +965,25 @@ static std::shared_ptr<RelocFile> portLoadRelocResource(u32 file_id)
 	auto relocFile = std::dynamic_pointer_cast<RelocFile>(resource);
 	if (!relocFile)
 	{
+		if (is_mod_resource)
+		{
+			auto init = resource->GetInitData();
+			port_log("SSB64: MOD_RELOC_LOAD status=WRONG_TYPE file_id=%u owner=%u path=%s type=0x%08x version=%d\n",
+			         file_id, mod_owner, path.c_str(),
+			         init ? init->Type : 0u, init ? init->ResourceVersion : -1);
+		}
 		spdlog::error("lbReloc bridge: '{}' is not a RelocFile", path);
 		return nullptr;
+	}
+	if (is_mod_resource)
+	{
+		static uint32_t s_mod_reloc_success_count = 0;
+		if (s_mod_reloc_success_count < 8)
+		{
+			port_log("SSB64: MOD_RELOC_LOAD status=OK file_id=%u owner=%u path=%s bytes=%u\n",
+			         file_id, mod_owner, path.c_str(), (unsigned)relocFile->Data.size());
+		}
+		s_mod_reloc_success_count++;
 	}
 
 	return relocFile;
@@ -1011,7 +1107,7 @@ extern "C" void portRelocLoadFileFromBytes(
 	bool is_fighter_figatree =
 		force_figatree_fixup || portRelocIsFighterFigatreeFile(file_id);
 	std::vector<uint8_t> figatree_reloc_words;
-	const char *table_path = (file_id < RELOC_FILE_COUNT) ? gRelocFileTable[file_id] : nullptr;
+		const char *table_path = portRelocGetResourcePath(file_id);
 	bool load_ok = true;
 	const char *failure_reason = nullptr;
 	std::vector<unsigned int> reloc_slot_offsets;
@@ -1230,8 +1326,8 @@ extern "C" void portRelocLoadFileFromBytes(
 	                                 table_path, loc, false });
 
 	/* Mirror this range into the DL-range registry so gfx_step's bounds
-	 * check accepts DLs resolved through reloc files. Path string from
-	 * gRelocFileTable is static (linker-emitted), safe to retain. */
+	 * check accepts DLs resolved through reloc files. Mod paths are interned
+	 * by ModRelocRegistry, so table_path remains valid after unregister. */
 	port_dl_range_register(ram_dst, copySize, table_path ? table_path : "reloc?");
 
 	// --- Internal pointer relocation (token-based) ---
@@ -1279,22 +1375,13 @@ extern "C" void portRelocLoadFileFromBytes(
 		u16 next_reloc = (u16)(*slot >> 16);
 		u16 words_num  = (u16)(*slot & 0xFFFF);
 
-		/* An intern target outside the file means this chain word is not a
-		 * chain word (corruption, or the walk already left the rails). */
-		if ((size_t)words_num * sizeof(u32) >= copySize)
-		{
-			spdlog::error("lbReloc bridge: file_id {} intern chain target OOB "
-			              "(slot_off={} target_words={} copySize={}) — stopping walk",
-			              file_id, reloc_intern, words_num, copySize);
-			port_log("SSB64: chainWalk STOP intern-target-oob file=%u slot=0x%x tgt=0x%x size=0x%x\n",
-			         file_id, (unsigned)reloc_intern, (unsigned)words_num, (unsigned int)copySize);
-			load_ok = false;
-			failure_reason = "intern-target-oob";
-			break;
-		}
-
-		// All reloc chain entries are intra-file pointers.  Tokenize them
-		// normally so the resource system can resolve them to PC addresses.
+			// N64 relocation calls these "intern" entries because the pointer is
+			// based on this file's allocation base, not because the final address
+			// is guaranteed to stay inside this file's decompressed byte span.
+			// Smash Remix has a few entries that intentionally point forward into
+			// a dependency allocated later in the same contiguous extern heap.
+			// Tokenize first and let the end-of-transaction validator prove that
+			// the final address belongs to a live range once the closure is loaded.
 		//
 		// Note: G_DL commands that reference segment 0x0E are NOT in the reloc
 		// chain — they exist as raw 0x0Exxxxxx values in the ROM data.
@@ -1311,8 +1398,8 @@ extern "C" void portRelocLoadFileFromBytes(
 			portRelocFixupTextureFromChain(ram_dst, copySize,
 			                               slot_byte_off, target_byte_off);
 
-			// Compute the real target pointer (within this file's data)
-			void *target = (void *)((uintptr_t)ram_dst + (words_num * sizeof(u32)));
+				// Compute the real target pointer from this file's allocation base.
+				void *target = (void *)((uintptr_t)ram_dst + (words_num * sizeof(u32)));
 
 			// Register in the token table and write the 32-bit token
 			u32 token = portRelocRegisterPointer(target);
@@ -1445,22 +1532,29 @@ extern "C" void portRelocLoadFileFromBytes(
 			break;
 		}
 
-		const PortRelocFileRange *dep_range = portRelocFindFileRange(dep_file_id, vaddr_extern);
-		size_t target_offset = (size_t)words_num * sizeof(u32);
-		if (dep_range == nullptr || target_offset >= dep_range->size)
-		{
-			port_log("SSB64: RELOC_EXTERN_TARGET_OOB file_id=%u extern_idx=%u dep_file_id=%u "
-			         "target_offset=%u dep_size=%u dep_address=%p\n",
-			         file_id, extern_idx, (unsigned)dep_file_id, (unsigned)target_offset,
-			         dep_range ? (unsigned)dep_range->size : 0U, vaddr_extern);
-			load_ok = false;
-			failure_reason = dep_range ? "extern-target-oob" : "extern-dependency-unregistered";
-			break;
-		}
+			const PortRelocFileRange *dep_range = portRelocFindFileRange(dep_file_id, vaddr_extern);
+			size_t target_offset = (size_t)words_num * sizeof(u32);
+			const uintptr_t dep_base = reinterpret_cast<uintptr_t>(vaddr_extern);
+			const uintptr_t target_addr = dep_base + target_offset;
+			if (dep_range == nullptr || target_addr < dep_base)
+			{
+				port_log("SSB64: RELOC_EXTERN_TARGET_OOB file_id=%u extern_idx=%u dep_file_id=%u "
+				         "target_offset=%u dep_size=%u dep_address=%p reason=%s\n",
+				         file_id, extern_idx, (unsigned)dep_file_id, (unsigned)target_offset,
+				         dep_range ? (unsigned)dep_range->size : 0U, vaddr_extern,
+				         dep_range ? "overflow" : "dependency-unregistered");
+				load_ok = false;
+				failure_reason = dep_range ? "extern-target-overflow" : "extern-dependency-unregistered";
+				break;
+			}
 
-		// Compute target pointer (offset into the dependency file's data)
-		void *target = (void *)((uintptr_t)vaddr_extern + target_offset);
-		token = portRelocRegisterPointer(target);
+			// Compute target pointer. Do not require it to belong to a range that is
+			// already published here: Smash Remix also uses forward references into
+			// dependencies that will be loaded later in this same extern transaction.
+			// portRelocValidateTransactionSlots() runs after the whole dependency
+			// closure is loaded and is the authoritative containment/readiness check.
+			void *target = reinterpret_cast<void *>(target_addr);
+			token = portRelocRegisterPointer(target);
 		reloc_slot_offsets.push_back((unsigned int)reloc_extern * (unsigned int)sizeof(u32));
 
 		if (is_fighter_figatree && (reloc_extern < figatree_reloc_words.size()))
@@ -1980,6 +2074,43 @@ extern "C" void portRelocSetExternFileHeap(void *heap)
 	sLBRelocExternFileHeap = heap;
 }
 
+/* Native-mod lifecycle helper. A mod can replace a resource provider while a
+ * previous copy of that file is still published in an lbReloc status buffer.
+ * Drop every published range/status entry for the id so the next request goes
+ * back through portLoadRelocResource and observes the current provider. Memory
+ * itself belongs to the scene/intern heaps and is intentionally not freed. */
+extern "C" void portRelocEvictFileId(unsigned int file_id)
+{
+	std::vector<PortRelocFileRange> matches;
+	for (const auto &range : sPortRelocFileRanges)
+	{
+		if (range.file_id == file_id)
+		{
+			matches.push_back(range);
+		}
+	}
+
+	for (const auto &range : matches)
+	{
+		portRelocRetractPublication(file_id,
+			                         reinterpret_cast<void *>(range.base),
+			                         range.size, range.location);
+	}
+
+	/* Also remove entries that predate range tracking or whose range was already
+	 * evicted by an overlapping heap reuse. */
+	portStatusBufferRemoveFileId(sLBRelocInternBuffer.status_buffer,
+		                         &sLBRelocInternBuffer.status_buffer_num, file_id);
+	portStatusBufferRemoveFileId(sLBRelocInternBuffer.force_status_buffer,
+		                         &sLBRelocInternBuffer.force_status_buffer_num, file_id);
+
+#ifdef __vita__
+	sPortRelocSemanticBaselines.erase(file_id);
+	sPortRelocQuarantinedSources.erase(file_id);
+	sPortRelocValidationRetries.erase(file_id);
+#endif
+}
+
 // // // // // // // // // // // //
 //                               //
 //     BRIDGE: BATCH LOADING     //
@@ -2164,8 +2295,8 @@ extern "C" void port_classify_dl_ptr(uintptr_t addr, char *buf, size_t buf_size)
 	uintptr_t reloc_base = 0;
 	int file_id = portRelocFindFileIdAndBase(reinterpret_cast<const void*>(addr), &reloc_base);
 	if (file_id >= 0) {
-		const char *path = (file_id < (int)RELOC_FILE_COUNT && gRelocFileTable[file_id])
-		                   ? gRelocFileTable[file_id] : "?";
+		const char *path = portRelocGetResourcePath((u32)file_id);
+		if (path == nullptr) path = "?";
 		std::snprintf(buf, buf_size, "reloc[%d]+0x%lx %s",
 		              file_id, (unsigned long)(addr - reloc_base), path);
 		return;

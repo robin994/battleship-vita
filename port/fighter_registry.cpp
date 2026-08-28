@@ -44,9 +44,23 @@ void port_fighter_register(int fkind, const FighterDescriptor *src)
     sRegistry[static_cast<size_t>(fkind)] = std::move(row);
 }
 
+void port_fighter_unregister(int fkind)
+{
+    if (fkind < 0 || static_cast<size_t>(fkind) >= sRegistry.size()) return;
+    sRegistry[static_cast<size_t>(fkind)].reset();
+}
+
 const FighterDescriptor *port_fighter_descriptor(int fkind)
 {
     return get(fkind);
+}
+
+int port_fighter_parent_fkind(int fkind)
+{
+    if (const auto *r = get(fkind)) {
+        if (r->parent_fkind >= 0) return r->parent_fkind;
+    }
+    return fkind;
 }
 
 struct FTData *port_fighter_data(int fkind)
@@ -307,6 +321,74 @@ float port_fighter_css_spotlight_scale(int fkind)
         if (r->css_spotlight_scale > 0.0f) return r->css_spotlight_scale;
     }
     return 1.5f;
+}
+
+static int cssResource(const FighterDescriptor *r, unsigned int file_id, unsigned int offset,
+                       unsigned int *out_file_id, unsigned int *out_offset)
+{
+    if (r == nullptr || file_id == 0) return 0;
+    if (out_file_id) *out_file_id = file_id;
+    if (out_offset) *out_offset = offset;
+    return 1;
+}
+
+int port_fighter_css_portrait(int fkind, unsigned int *out_file_id, unsigned int *out_offset)
+{
+    const auto *r = get(fkind);
+    return cssResource(r, r ? r->css_portrait_file_id : 0u,
+                       r ? r->css_portrait_offset : 0u, out_file_id, out_offset);
+}
+
+int port_fighter_css_name(int fkind, unsigned int *out_file_id, unsigned int *out_offset)
+{
+    const auto *r = get(fkind);
+    return cssResource(r, r ? r->css_name_file_id : 0u,
+                       r ? r->css_name_offset : 0u, out_file_id, out_offset);
+}
+
+int port_fighter_css_emblem(int fkind, unsigned int *out_file_id, unsigned int *out_offset)
+{
+    const auto *r = get(fkind);
+    return cssResource(r, r ? r->css_emblem_file_id : 0u,
+                       r ? r->css_emblem_offset : 0u, out_file_id, out_offset);
+}
+
+int port_fighter_css_portrait_flash(int fkind, unsigned int *out_file_id, unsigned int *out_offset)
+{
+    const auto *r = get(fkind);
+    return cssResource(r, r ? r->css_portrait_flash_file_id : 0u,
+                       r ? r->css_portrait_flash_offset : 0u, out_file_id, out_offset);
+}
+
+int port_fighter_intro_name(int fkind, unsigned int *out_file_id, unsigned int *out_offset)
+{
+    const auto *r = get(fkind);
+    return cssResource(r, r ? r->intro_name_file_id : 0u,
+                       r ? r->intro_name_offset : 0u, out_file_id, out_offset);
+}
+
+int port_fighter_announce_fgm(int fkind)
+{
+    if (const auto *r = get(fkind)) return r->announce_fgm;
+    return 0;
+}
+
+PortFTProcFrameFn port_fighter_proc_frame(int fkind)
+{
+    if (const auto *r = get(fkind)) return r->proc_frame;
+    return nullptr;
+}
+
+int port_fighter_forward_throw_status(int fkind)
+{
+    if (const auto *r = get(fkind)) return r->forward_throw_status_id;
+    return -1;
+}
+
+int port_fighter_jab3_status(int fkind)
+{
+    if (const auto *r = get(fkind)) return r->jab3_status_id;
+    return -1;
 }
 
 int port_fighter_custom_capture_action(int fkind)

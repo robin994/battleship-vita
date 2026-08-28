@@ -32,6 +32,12 @@ extern "C" {
 uint32_t portRelocRegisterPointer(void *ptr);
 
 /**
+ * Invalidate one live token. Returns non-zero if it was live and is now
+ * invalidated, zero for NULL/stale/non-token values.
+ */
+int portRelocUnregisterPointer(uint32_t token);
+
+/**
  * Resolve a 32-bit token back to a 64-bit pointer.
  * Token 0 returns NULL.
  */

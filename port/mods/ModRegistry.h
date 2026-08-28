@@ -17,8 +17,9 @@
  * "Loaded" is keyed by the manifest name, which is the same key
  * ScriptLoader stores its loaded modules under (mLoadedScripts[Name]).
  *
- * Only compiled when scripting is enabled (the whole port/mods/ tree is
- * filtered out under DISABLE_SCRIPTING by the top-level CMakeLists).
+ * Desktop uses ScriptLoader/TCC for loaded state. Vita uses VitaModLoader's
+ * native-module state, so this inventory remains available even though the
+ * desktop scripting backend stays disabled there.
  */
 #pragma once
 
@@ -31,6 +32,7 @@ namespace ssb64::mods {
 enum class ModState {
     Loaded,          /* compiled + ModInit ran: live in the engine        */
     NotLoaded,       /* mounted/installed but not currently loaded         */
+    Disabled,        /* installed but disabled by the user                  */
     InvalidManifest, /* mounted, but manifest.json is unnamed/unparseable  */
 };
 
@@ -41,6 +43,7 @@ struct ModInfo {
     std::string author;      /* manifest "author"                            */
     std::string description; /* manifest "description"                       */
     std::string archivePath; /* absolute path of the mounted folder / .o2r   */
+    bool enabled = true;      /* persisted Vita load preference                */
     ModState state = ModState::NotLoaded;
     std::string note; /* human-readable detail; set for InvalidManifest */
 };

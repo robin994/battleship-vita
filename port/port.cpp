@@ -182,16 +182,19 @@ static void VitaPresentShaderWarmupProgress(unsigned int completed, unsigned int
 #if defined(__ANDROID__)
 #include <android/api-level.h>  // android_get_device_api_level (audio-driver gate)
 #endif
-#ifndef DISABLE_SCRIPTING
+#if !defined(DISABLE_SCRIPTING)
 #include "mods/HookManager.h"
 #include "mods/SymbolResolver.h"
+#endif
+#ifdef __vita__
+#include "mods/VitaModLoader.h"
 #endif
 #include "renderdoc_trigger.h"
 #include "port_log.h"
 #include "fighter_registry.h"
 #include "focus.h"
 
-#ifndef DISABLE_SCRIPTING
+#if !defined(DISABLE_SCRIPTING)
 #include <ship/scripting/ScriptLoader.h>
 #include <libultraship/bridge/scriptingbridge.h>
 #endif
@@ -575,7 +578,7 @@ static LONG WINAPI portWindowsCrashFilter(EXCEPTION_POINTERS* info)
 
 static std::shared_ptr<Ship::Context> sContext;
 
-#ifndef DISABLE_SCRIPTING
+#if !defined(DISABLE_SCRIPTING) || defined(__vita__)
 namespace ssb64 {
 
 /* Recursively walk mods/, mounting any folder that contains a
@@ -601,7 +604,11 @@ void MountModsDir() {
 	auto am = rm->GetArchiveManager();
 	if (!am) return;
 
+#ifdef __vita__
+	const fs::path modsDir(Ship::Context::GetAppDirectoryPath() + "/mods");
+#else
 	const fs::path modsDir(ssb64::RealAppBundlePath() + "/mods");
+#endif
 	std::error_code ec;
 	if (!fs::exists(modsDir, ec)) {
 		return;
@@ -688,6 +695,28 @@ void UnmountMissingMods() {
 	for (const auto& path : stale) {
 		am->RemoveArchive(path);
 		port_log("SSB64: unmounted deleted mod archive -> %s\n", path.c_str());
+	}
+}
+
+/* Temporarily remove every mounted mod archive while keeping the on-disk
+ * installation and enable preferences untouched. Netplay uses this to force a
+ * vanilla resource view; MountModsDir() restores the same archives afterwards. */
+void UnmountAllMods() {
+	auto rm = sContext ? sContext->GetResourceManager() : nullptr;
+	if (!rm) return;
+	auto am = rm->GetArchiveManager();
+	if (!am) return;
+	auto archives = am->GetArchives();
+	if (!archives) return;
+
+	std::vector<std::string> mountedMods;
+	for (const auto& archive : *archives) {
+		if (!archive || !archive->HasFile("manifest.json")) continue;
+		mountedMods.push_back(archive->GetPath());
+	}
+	for (const auto& path : mountedMods) {
+		am->RemoveArchive(path);
+		port_log("SSB64: vanilla netplay unmounted mod archive -> %s\n", path.c_str());
 	}
 }
 
@@ -1492,7 +1521,14 @@ static int PortInitImpl(int argc, char* argv[]) {
 	port_fighter_seed_vanilla();
 	port_log("SSB64: fighter registry seeded\n");
 
-#ifndef DISABLE_SCRIPTING
+#ifdef __vita__
+	/* Vita mods are precompiled ARM modules stored inside the same .o2r
+	 * containers used on desktop. No JIT or inline-detour backend is needed:
+	 * module_start receives the stable BattleShip Vita mod API table. */
+	ssb64::MountModsDir();
+	ssb64::mods::VitaModLoader::LoadAll();
+	port_log("SSB64: Vita native mods scanned + loaded\n");
+#elif !defined(DISABLE_SCRIPTING)
 	/* Mount mods/ entries (folders, .o2r, .zip) into the LUS
 	 * ArchiveManager so ScriptLoader can iterate them. */
 	ssb64::MountModsDir();
@@ -1528,6 +1564,11 @@ static int PortInitImpl(int argc, char* argv[]) {
 }
 
 void PortShutdown(void) {
+#ifdef __vita__
+	/* Stop native mod modules while the engine registries/resources they may
+	 * reference are still alive. */
+	ssb64::mods::VitaModLoader::UnloadAll();
+#endif
 #ifndef DISABLE_SCRIPTING
 	// Tear down mod hooks first so no replacement function fires during
 	// engine shutdown (replacement code might call into ssb64_game state

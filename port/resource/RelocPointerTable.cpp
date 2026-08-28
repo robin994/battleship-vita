@@ -173,6 +173,21 @@ uint32_t portRelocRegisterPointer(void *ptr)
     return makeToken(index, gen);
 }
 
+int portRelocUnregisterPointer(uint32_t token)
+{
+    if (token == 0) {
+        return 0;
+    }
+    uint32_t index = 0;
+    if (!decodeToken(token, &index)) {
+        return 0;
+    }
+    sSlots[index].ptr = nullptr;
+    sSlots[index].gen = bumpSlotGeneration(sSlots[index].gen);
+    sFreeIndices.push_back(index);
+    return 1;
+}
+
 void *portRelocResolvePointer(uint32_t token)
 {
     return portRelocResolvePointerDebug(token, nullptr, 0);

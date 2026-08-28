@@ -13,6 +13,7 @@
 // portAudioPushSilence() once per tick.
 
 #include "audio_playback.h"
+#include "mod_audio.h"
 #include "port_log.h"
 
 #include <libultraship/bridge/audiobridge.h>
@@ -35,6 +36,7 @@ static constexpr int32_t MAX_SAMPLES_STEREO = SAMPLES_PER_FRAME_HIGH * 2;
 
 // Persistent silence buffer — zeroed once, reused every frame.
 static int16_t sSilenceBuf[MAX_SAMPLES_STEREO];
+static int16_t sSubmitMixBuf[MAX_SAMPLES_STEREO];
 static bool    sInitialized = false;
 
 #if !defined(__vita__) || !defined(SSB64_VITA_RUNTIME_DIAG) || SSB64_VITA_RUNTIME_DIAG
@@ -294,6 +296,16 @@ extern "C" void portAudioSubmitFrame(const void *buf, int sampleCount)
     }
     const int16_t* pcm = reinterpret_cast<const int16_t*>(buf);
     pcm = applyOutputFilter(pcm, sampleCount);
+
+    /* External fighter/mod FGMs are mixed after the N64 synthesis/output
+     * filter, at the same 32 kHz stereo format sent to AudioPlayer. Keep the
+     * original synthesis buffer immutable: some backends reuse it immediately
+     * after this callback. */
+    if (sampleCount * 2 <= MAX_SAMPLES_STEREO) {
+        std::memcpy(sSubmitMixBuf, pcm, byteLen);
+        portModAudioMixFrame(sSubmitMixBuf, sampleCount);
+        pcm = sSubmitMixBuf;
+    }
 
     wavAppend(pcm, byteLen);
 

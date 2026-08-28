@@ -137,6 +137,28 @@ extern "C" int port_dl_check_addr(uintptr_t addr) {
     return walked_past ? PORT_DL_WALKED_PAST : PORT_DL_UNKNOWN;
 }
 
+extern "C" uintptr_t port_dl_range_end(uintptr_t addr) {
+    if (addr == 0) return 0;
+
+    const uint32_t gen = sRangesGen.load(std::memory_order_relaxed);
+    {
+        const HitCache c = sHitCache;
+        if (c.gen == gen && c.size != 0 &&
+            (addr >= c.base) && ((addr - c.base) < c.size)) {
+            return c.base + c.size;
+        }
+    }
+
+    std::lock_guard<std::mutex> lk(sRangesMtx);
+    for (const auto &e : sRanges) {
+        if ((addr >= e.base) && ((addr - e.base) < e.size)) {
+            sHitCache = HitCache{gen, e.base, e.size};
+            return e.base + e.size;
+        }
+    }
+    return 0;
+}
+
 extern "C" int port_dl_range_classify_str(uintptr_t addr, char *buf, size_t buf_size) {
     if (buf == nullptr || buf_size == 0) return 0;
     if (addr == 0) {
@@ -172,5 +194,6 @@ extern "C" int port_dl_range_classify_str(uintptr_t addr, char *buf, size_t buf_
  * receives from these registrations. */
 extern "C" void port_dl_ranges_init(void) {
     Fast::RegisterDLBoundsCheck(&port_dl_check_addr);
+    Fast::RegisterDLBoundsResolve(&port_dl_range_end);
     Fast::RegisterAddressClassifier(&port_dl_range_classify_str);
 }

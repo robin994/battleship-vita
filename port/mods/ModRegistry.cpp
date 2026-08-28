@@ -13,7 +13,12 @@
 #include <ship/resource/ResourceManager.h>
 #include <ship/resource/archive/ArchiveManager.h>
 #include <ship/resource/archive/Archive.h> // Archive, ArchiveManifest, GetManifest
+#ifndef DISABLE_SCRIPTING
 #include <ship/scripting/ScriptLoader.h>   // GetLoadersInDependencyOrder
+#endif
+#ifdef __vita__
+#include "VitaModLoader.h"
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -68,11 +73,15 @@ std::vector<ModInfo> ModRegistry::Snapshot() {
      * manifest name — the same key ScriptLoader uses internally. If the
      * loader is not up, every mod simply reports NotLoaded. */
     std::unordered_set<std::string> loaded;
+#ifdef __vita__
+    loaded = VitaModLoader::LoadedNames();
+#elif !defined(DISABLE_SCRIPTING)
     if (auto scripting = ctx->GetScriptLoader()) {
         for (const auto& name : scripting->GetLoadersInDependencyOrder()) {
             loaded.insert(name);
         }
     }
+#endif
 
     for (const auto& archive : *archives) {
         if (!archive) {
@@ -100,7 +109,26 @@ std::vector<ModInfo> ModRegistry::Snapshot() {
             info.note = "manifest.json is missing a \"name\" or could not be parsed";
         } else {
             info.name = manifest.Name;
+#ifdef __vita__
+            info.enabled = VitaModLoader::IsEnabled(manifest.Name);
+            if (loaded.count(manifest.Name)) {
+                info.state = ModState::Loaded;
+                if (!info.enabled) {
+                    info.note = "disable pending - press Apply / Reload or restart";
+                }
+            } else if (!info.enabled) {
+                info.state = ModState::Disabled;
+            } else {
+                info.state = ModState::NotLoaded;
+            }
+            if (info.state == ModState::NotLoaded &&
+                !manifest.Binaries.contains("vita") &&
+                !manifest.Binaries.contains("vita_armv7")) {
+                info.note = "no Vita native binary (manifest binaries.vita)";
+            }
+#else
             info.state = loaded.count(manifest.Name) ? ModState::Loaded : ModState::NotLoaded;
+#endif
         }
 
         mods.push_back(std::move(info));
@@ -109,8 +137,12 @@ std::vector<ModInfo> ModRegistry::Snapshot() {
     /* Loaded mods first, then case-insensitive by name — stable across
      * frames so the rendered list does not jump around. */
     std::sort(mods.begin(), mods.end(), [](const ModInfo& a, const ModInfo& b) {
-        const int rankA = (a.state == ModState::Loaded) ? 0 : 1;
-        const int rankB = (b.state == ModState::Loaded) ? 0 : 1;
+        const int rankA = (a.state == ModState::Loaded) ? 0 :
+                          (a.state == ModState::NotLoaded) ? 1 :
+                          (a.state == ModState::Disabled) ? 2 : 3;
+        const int rankB = (b.state == ModState::Loaded) ? 0 :
+                          (b.state == ModState::NotLoaded) ? 1 :
+                          (b.state == ModState::Disabled) ? 2 : 3;
         if (rankA != rankB) {
             return rankA < rankB;
         }

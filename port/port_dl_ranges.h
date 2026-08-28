@@ -46,9 +46,13 @@ void port_dl_range_register(const void *base, size_t size, const char *label);
 /* Unregister by exact base. No-op if not found. */
 void port_dl_range_unregister(const void *base);
 
-/* Classify addr against the registry. Hot path: called from gfx_step
- * before every deref. Should be O(N) for small N (~50 ranges). */
+/* Classify addr against the registry. Used on DL pushes and diagnostics. */
 int port_dl_check_addr(uintptr_t addr);
+
+/* Return the exclusive end address of the registered range containing addr,
+ * or 0 when addr is unknown. Fast3D resolves this once when a DL frame is
+ * pushed, then performs the per-command end check locally. */
+uintptr_t port_dl_range_end(uintptr_t addr);
 
 /* Diagnostic-only: write a human-readable classification (label+offset)
  * into buf. Returns true if addr was in a registered range. */

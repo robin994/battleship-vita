@@ -22,9 +22,13 @@
 #ifndef DISABLE_SCRIPTING
 #include <ship/scripting/ScriptLoader.h>
 #include "../mods/HookManager.h"
+#endif
+#if !defined(DISABLE_SCRIPTING) || defined(__vita__)
 #include "../mods/ModRegistry.h"
-
 namespace ssb64 { void MountModsDir(); void UnmountMissingMods(); }
+#endif
+#ifdef __vita__
+#include "../mods/VitaModLoader.h"
 #endif
 
 #include <imgui.h>
@@ -1455,7 +1459,7 @@ void PortMenu::AddMenuAssets() {
 #endif // PORT_HIRES_ENABLED
 }
 
-#ifndef DISABLE_SCRIPTING
+#if !defined(DISABLE_SCRIPTING) || defined(__vita__)
 // Cached, read-only mod list for the Mods panel. The set of installed mods
 // only changes on a reload or restart, so we snapshot on demand (first view,
 // Rescan, and after a Hot Reload) rather than re-scanning every frame.
@@ -1474,6 +1478,13 @@ static void RefreshModList() {
 }
 
 static void DoHotReload() {
+#ifdef __vita__
+    ssb64::mods::VitaModLoader::UnloadAll();
+    ssb64::UnmountMissingMods();
+    ssb64::MountModsDir();
+    ssb64::mods::VitaModLoader::LoadAll();
+    RefreshModList();
+#else
     auto scripting = Ship::Context::GetInstance()->GetScriptLoader();
     if (!scripting) {
         return;
@@ -1509,20 +1520,32 @@ static void DoHotReload() {
     } catch (const std::exception& e) {
         SPDLOG_ERROR("Mod reload failed: {}", e.what());
     }
+#endif
 }
 
 void PortMenu::AddMenuMods() {
-    WidgetPath path = { "Assets", "Script Mods", SECTION_COLUMN_1 };
-    AddSidebarEntry("Assets", "Script Mods", 1);
+    WidgetPath path = { "Assets", "Mods", SECTION_COLUMN_1 };
+    AddSidebarEntry("Assets", "Mods", 1);
     AddWidget(path, "mods_panel", WIDGET_CUSTOM)
         .CustomFunction([](WidgetInfo&) {
             // --- Action bar -------------------------------------------------
+#ifdef __vita__
+            if (ImGui::Button("Apply / Reload")) {
+                DoHotReload(); // re-snapshots s_modList when it finishes
+            }
+#else
             if (ImGui::Button("Hot Reload")) {
                 DoHotReload(); // re-snapshots s_modList when it finishes
             }
+#endif
             if (ImGui::IsItemHovered()) {
+#ifdef __vita__
+                ImGui::SetTooltip("Apply enabled/disabled choices and reload native Vita mods.\n"
+                                  "Use from a frontend/menu scene; restart is safest after disabling a live mod.");
+#else
                 ImGui::SetTooltip("Unload + recompile + re-init all TCC mods.\n"
                                   "Adding or removing mod folders still needs an engine restart.");
+#endif
             }
             ImGui::SameLine();
             if (ImGui::Button("Rescan")) {
@@ -1532,12 +1555,17 @@ void PortMenu::AddMenuMods() {
                 ImGui::SetTooltip("Re-read the mods/ folder without reloading the mods.");
             }
             ImGui::SameLine();
+#ifdef __vita__
+            ImGui::TextDisabled("ux0:data/battleship/mods/");
+            ImGui::TextWrapped("Enabled choices are persistent. Apply / Reload activates them now; otherwise they take effect next boot.");
+#else
             if (ImGui::Button("Open Mods Folder")) {
                 std::string modsPath = Ship::Context::GetPathRelativeToAppDirectory("mods");
                 std::error_code ec;
                 fs::create_directories(modsPath, ec);
                 SDL_OpenURL(std::string("file:///" + fs::absolute(modsPath).string()).c_str());
             }
+#endif
 
             // Build the list once on first view; thereafter only on demand.
             if (!s_modListLoaded) {
@@ -1575,6 +1603,7 @@ void PortMenu::AddMenuMods() {
             int loadedCount = 0;
             int issueCount = 0;
             int shown = 0;
+            bool preferenceChanged = false;
             for (const auto& mod : s_modList) {
                 using ssb64::mods::ModState;
                 if (mod.state == ModState::Loaded) {
@@ -1590,12 +1619,25 @@ void PortMenu::AddMenuMods() {
 
                 ImGui::PushID(mod.archivePath.c_str()); // unique id per card
 
+#ifdef __vita__
+                if (mod.state != ModState::InvalidManifest) {
+                    bool enabled = mod.enabled;
+                    if (ImGui::Checkbox("Enabled", &enabled)) {
+                        ssb64::mods::VitaModLoader::SetEnabled(mod.name, enabled);
+                        preferenceChanged = true;
+                    }
+                    ImGui::SameLine();
+                }
+#endif
                 switch (mod.state) {
                     case ModState::Loaded:
                         ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.40f, 1.0f), "LOADED");
                         break;
                     case ModState::NotLoaded:
                         ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.65f, 1.0f), "not loaded");
+                        break;
+                    case ModState::Disabled:
+                        ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f), "DISABLED");
                         break;
                     case ModState::InvalidManifest:
                         ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.20f, 1.0f), "manifest issue");
@@ -1624,6 +1666,11 @@ void PortMenu::AddMenuMods() {
 
                 ImGui::PopID();
                 ImGui::Separator();
+            }
+
+            if (preferenceChanged) {
+                RefreshModList();
+                return;
             }
 
             if (shown == 0) {
@@ -1742,7 +1789,7 @@ void PortMenu::AddMenuAbout() {
 void PortMenu::AddMenuElements() {
     AddMenuSettings();
     AddMenuAssets();
-#ifndef DISABLE_SCRIPTING
+#if !defined(DISABLE_SCRIPTING) || defined(__vita__)
     AddMenuMods();
 #endif
     AddMenuAbout();
