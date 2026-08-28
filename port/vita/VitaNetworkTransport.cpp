@@ -128,9 +128,7 @@ bool QueryPdpLocalPort(SocketHandle socket, uint16_t& port) {
     const auto* stat = stats.data();
     while (stat != nullptr) {
         if (stat->id == socket) {
-            // PSPNet AdHoc reports PDP stat ports in network byte order, the
-            // same representation vitaQuake stores in sockaddr_adhoc.
-            port = sceNetNtohs(stat->lport);
+            port = stat->lport;
             sLastAdhocError = 0;
             return true;
         }
@@ -535,10 +533,7 @@ int SendDatagram(NetplayMode mode, SocketHandle socket, const void* data, std::s
         return sLastAdhocError;
     }
     const SceNetEtherAddr mac = ToAdhocMac(address);
-    // ScePspnetAdhoc uses network byte order for the remote PDP port. This is
-    // also how vitaQuake builds its broadcast sockaddr before PdpSend().
-    const SceUShort16 remotePort = sceNetHtons(address.port);
-    const int result = sceNetAdhocPdpSend(socket, &mac, remotePort, data,
+    const int result = sceNetAdhocPdpSend(socket, &mac, address.port, data,
                                           static_cast<int>(size), 0, SCE_NET_ADHOC_F_NONBLOCK);
     if (result < 0) {
         sLastAdhocError = result;
@@ -564,9 +559,7 @@ int RecvDatagram(NetplayMode mode, SocketHandle socket, void* data, std::size_t 
         sLastAdhocError = result;
         return result;
     }
-    // Keep SocketAddress ports in host byte order; PDP reports the sender port
-    // in network byte order.
-    address = FromAdhoc(source, sceNetNtohs(sourcePort));
+    address = FromAdhoc(source, sourcePort);
     return length;
 #else
     return RecvFromOnline(socket, data, size, address);

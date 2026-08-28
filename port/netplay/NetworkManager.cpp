@@ -287,6 +287,16 @@ void NetworkManager::WorkerMain() {
         }
 
         ProcessCommands();
+
+        if (Mode() != NetplayMode::LocalAdhoc && mAdhocInitialized.load(std::memory_order_acquire)) {
+            platform::ShutdownAdhoc();
+            mAdhocInitialized.store(false, std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> lock(mMutex);
+                mLocalMac.clear();
+            }
+        }
+
         if (mNetworkInitialized.load(std::memory_order_acquire)) {
             PollNetworkServices();
         }
@@ -377,6 +387,7 @@ void NetworkManager::ProcessCommands() {
                         mLocalMac = status.localMac;
                         mLastError.clear();
                     }
+                    platform::PrepareAdhocConnectionDialog();
                 } else {
                     platform::ShutdownAdhoc();
                     mAdhocInitialized.store(false, std::memory_order_release);

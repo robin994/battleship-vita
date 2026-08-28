@@ -295,11 +295,11 @@ NetworkPlatformStatus InitializeAdhoc() {
 #endif
 
     sAdhocInitialized = true;
-    // The native PSP AdHoc transport is ready as soon as adhoc + adhocctl are
-    // initialized and the local MAC is available. vitaQuake's AdHoc backend
-    // opens PDP sockets directly from this state; NetCheckDialog is not a
-    // prerequisite for PDP/PTP traffic and is not available in every runtime.
+#ifdef __vita__
+    sAdhocConnectionState.store(AdhocConnectionState::Inactive, std::memory_order_release);
+#else
     sAdhocConnectionState.store(AdhocConnectionState::Connected, std::memory_order_release);
+#endif
     sAdhocDialogError.store(0, std::memory_order_release);
     NetworkPlatformStatus status = MakeStatus();
     port_log("[NETPLAY] AdHoc platform initialized mac=%s\n",
@@ -424,20 +424,25 @@ bool IsCommonDialogActive() {
 }
 
 void ShutdownAdhoc() {
-    if (!sAdhocInitialized) return;
 #ifdef __vita__
-    if (sAdhocCtlOwned) {
-        sceNetAdhocctlTerm();
-        sAdhocCtlOwned = false;
+    int adhocState = 0;
+    if (sceNetCtlAdhocGetState(&adhocState) >= 0 && adhocState != 0) {
+        sceNetCtlAdhocDisconnect();
     }
-    if (sAdhocOwned) {
+    if (sAdhocModuleOwned || sceSysmoduleIsLoaded(SCE_SYSMODULE_PSPNET_ADHOC) >= 0) {
+        sceNetAdhocctlTerm();
         sceNetAdhocTerm();
-        sAdhocOwned = false;
     }
     if (sAdhocModuleOwned) {
         sceSysmoduleUnloadModule(SCE_SYSMODULE_PSPNET_ADHOC);
         sAdhocModuleOwned = false;
     }
+    if (sNetCtlOwned) {
+        sceNetCtlTerm();
+        sceNetCtlInit();
+    }
+    sAdhocCtlOwned = false;
+    sAdhocOwned = false;
     sAdhocMac = {};
     sAdhocGroupName = {};
 #endif
