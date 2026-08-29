@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -91,6 +92,29 @@ enum class RejectReason : uint8_t {
     HostClosing,
 };
 
+enum class MatchResultReason : uint8_t {
+    Completed = 0,
+    NoContest,
+    PeerDisconnected,
+    DesyncAbort,
+};
+
+struct MatchResultPayload {
+    uint32_t matchId = 0;
+    uint32_t finalFrame = 0;
+    uint8_t winner = 0xFF;
+    MatchResultReason reason = MatchResultReason::Completed;
+    std::array<uint8_t, kMaxPlayers> placements{0xFF, 0xFF, 0xFF, 0xFF};
+    std::array<int8_t, kMaxPlayers> stocksRemaining{-1, -1, -1, -1};
+    bool hasFinalHash = false;
+    uint64_t finalHash = 0;
+};
+
+struct RematchPayload {
+    uint32_t matchId = 0;
+    uint32_t rngSeed = 0;
+};
+
 struct PacketHeader {
     uint16_t protocolVersion = kProtocolVersion;
     PacketType type = PacketType::Heartbeat;
@@ -126,6 +150,10 @@ uint32_t ProtocolChecksum(const uint8_t* data, std::size_t size,
 const char* PacketTypeName(PacketType type);
 const char* StateName(NetplayState state);
 const char* LobbyStatusName(LobbyStatus status);
+bool EncodeMatchResultPayload(const MatchResultPayload& result, std::vector<uint8_t>& payload);
+bool DecodeMatchResultPayload(const std::vector<uint8_t>& payload, MatchResultPayload& result);
+bool EncodeRematchPayload(const RematchPayload& rematch, std::vector<uint8_t>& payload);
+bool DecodeRematchPayload(const std::vector<uint8_t>& payload, RematchPayload& rematch);
 
 // Helpers for explicit payload serialization. They perform bounds checks and
 // keep protocol code independent from host endian/alignment.

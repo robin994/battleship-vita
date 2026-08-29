@@ -1115,11 +1115,12 @@ void PortMenu::AddMenuSettings() {
         .CVar(ssb64::enhancements::ClassicCoopCVarName())
         .RaceDisable(false)
         .Options(CheckboxOptions()
-                     .Tooltip("Classic (1P) mode uses the VS Mode Character Select Screen so a "
-                              "second player can join the whole run as a co-op partner. If only "
-                              "one player picks a character, the run plays as normal solo "
-                              "Classic. Restart required for the toggle to take effect.")
-                     .DefaultValue(true));
+                     .Tooltip("When on, Classic (1P) mode uses the VS Mode Character Select Screen "
+                              "so a second player can join the whole run as a co-op partner. If only "
+                              "one player picks a character, the run plays as normal solo Classic. "
+                              "When off (default), Classic mode uses its own 1P character-select "
+                              "screen. Restart required for the toggle to take effect.")
+                     .DefaultValue(false));
     AddWidget(path, "Co-op Friendly Fire", WIDGET_CVAR_CHECKBOX)
         .CVar(ssb64::enhancements::ClassicCoopFriendlyFireCVarName())
         .RaceDisable(false)

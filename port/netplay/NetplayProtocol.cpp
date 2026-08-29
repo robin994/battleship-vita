@@ -242,6 +242,75 @@ bool PayloadReader::String(std::string_view& value, std::size_t maxBytes) {
     return true;
 }
 
+bool EncodeMatchResultPayload(const MatchResultPayload& result, std::vector<uint8_t>& payload) {
+    if (result.matchId == 0 || (result.winner != 0xFF && result.winner >= kMaxPlayers) ||
+        static_cast<uint8_t>(result.reason) > static_cast<uint8_t>(MatchResultReason::DesyncAbort)) {
+        return false;
+    }
+    payload.clear();
+    PayloadWriter writer(payload);
+    if (!writer.U32(result.matchId) || !writer.U32(result.finalFrame) || !writer.U8(result.winner) ||
+        !writer.U8(static_cast<uint8_t>(result.reason)) || !writer.U8(result.hasFinalHash ? 1 : 0)) {
+        return false;
+    }
+    for (std::size_t player = 0; player < kMaxPlayers; ++player) {
+        if ((result.placements[player] != 0xFF && result.placements[player] >= kMaxPlayers) ||
+            result.stocksRemaining[player] < -1 || result.stocksRemaining[player] > 99 ||
+            !writer.U8(result.placements[player]) || !writer.S8(result.stocksRemaining[player])) {
+            payload.clear();
+            return false;
+        }
+    }
+    return writer.U32(static_cast<uint32_t>(result.finalHash >> 32)) &&
+           writer.U32(static_cast<uint32_t>(result.finalHash));
+}
+
+bool DecodeMatchResultPayload(const std::vector<uint8_t>& payload, MatchResultPayload& result) {
+    MatchResultPayload decoded{};
+    uint8_t reason = 0;
+    uint8_t hasHash = 0;
+    uint32_t hashHigh = 0;
+    uint32_t hashLow = 0;
+    PayloadReader reader(payload.data(), payload.size());
+    if (!reader.U32(decoded.matchId) || !reader.U32(decoded.finalFrame) || !reader.U8(decoded.winner) ||
+        !reader.U8(reason) || !reader.U8(hasHash) || decoded.matchId == 0 ||
+        (decoded.winner != 0xFF && decoded.winner >= kMaxPlayers) ||
+        reason > static_cast<uint8_t>(MatchResultReason::DesyncAbort) || hasHash > 1) {
+        return false;
+    }
+    for (std::size_t player = 0; player < kMaxPlayers; ++player) {
+        if (!reader.U8(decoded.placements[player]) || !reader.S8(decoded.stocksRemaining[player]) ||
+            (decoded.placements[player] != 0xFF && decoded.placements[player] >= kMaxPlayers) ||
+            decoded.stocksRemaining[player] < -1 || decoded.stocksRemaining[player] > 99) {
+            return false;
+        }
+    }
+    if (!reader.U32(hashHigh) || !reader.U32(hashLow) || !reader.Empty()) return false;
+    decoded.reason = static_cast<MatchResultReason>(reason);
+    decoded.hasFinalHash = hasHash != 0;
+    decoded.finalHash = (static_cast<uint64_t>(hashHigh) << 32) | hashLow;
+    result = decoded;
+    return true;
+}
+
+bool EncodeRematchPayload(const RematchPayload& rematch, std::vector<uint8_t>& payload) {
+    if (rematch.matchId == 0 || rematch.rngSeed == 0) return false;
+    payload.clear();
+    PayloadWriter writer(payload);
+    return writer.U32(rematch.matchId) && writer.U32(rematch.rngSeed);
+}
+
+bool DecodeRematchPayload(const std::vector<uint8_t>& payload, RematchPayload& rematch) {
+    RematchPayload decoded{};
+    PayloadReader reader(payload.data(), payload.size());
+    if (!reader.U32(decoded.matchId) || !reader.U32(decoded.rngSeed) || !reader.Empty() ||
+        decoded.matchId == 0 || decoded.rngSeed == 0) {
+        return false;
+    }
+    rematch = decoded;
+    return true;
+}
+
 const char* PacketTypeName(PacketType type) {
     switch (type) {
         case PacketType::DiscoveryRequest: return "DISCOVERY_REQUEST";

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "GameplaySession.h"
 #include "LanDiscovery.h"
 #include "LobbySession.h"
 #include "NetplayProtocol.h"
@@ -67,6 +68,20 @@ public:
     bool GetMatchConfig(PortNetplayMatchConfig& config) const;
     void NotifyLoadingReady();
     bool MatchGateTick();
+    void SubmitStateHash(uint32_t frame, uint64_t hash);
+    uint32_t DeterminismMismatchCount() const;
+    bool GameplayActive() const;
+    int ResolvedInputDelay() const { return mResolvedInputDelay.load(std::memory_order_acquire); }
+    void SubmitGameplayInput(uint32_t frame, uint16_t buttons, int8_t stickX, int8_t stickY);
+    void AbortGameplayDesync(uint32_t mismatchFrame, uint32_t currentFrame, uint8_t reason);
+    void NotifyMatchFinished(const MatchResultPayload& result);
+    void RequestResultsRematch();
+    void RequestResultsCharacterSelect();
+    void RequestResultsLeave();
+    uint32_t ResultMismatchCount() const;
+    bool ConsumeGameplayInput(GameplayFrameInput& input);
+    GameplayStats GameplayTransportStats() const { return mGameplay.Stats(); }
+    void GameplayLatency(uint32_t& pingMs, uint32_t& jitterMs) const;
 
     std::vector<DiscoveredLobby> DiscoveredLobbies() const;
     LobbyView Lobby() const;
@@ -90,6 +105,13 @@ private:
     void PollNetworkServices();
     void PublishSnapshots();
     uint32_t MakeSessionId() const;
+    bool StartGameplayTransport(int forcedDelay = -1);
+    int ResolveInputDelay(const LobbyView& lobby) const;
+    void ResetRoundState(bool clearMatchConfig, bool clearCssState);
+    uint32_t NextRematchSeed(uint32_t nextMatchId) const;
+    uint32_t GameplaySessionId(uint32_t lobbySessionId) const;
+    static bool MatchResultsEquivalent(const MatchResultPayload& local,
+                                       const MatchResultPayload& authoritative);
 
     enum class CommandType {
         StartDiscovery,
@@ -104,6 +126,12 @@ private:
         CssUnlock,
         CommitMatchConfig,
         LoadingReady,
+        StateHash,
+        GameplayAbort,
+        MatchFinished,
+        ResultsRematch,
+        ResultsCharacterSelect,
+        ResultsLeave,
         SetMode,
     };
 
@@ -119,6 +147,9 @@ private:
         uint8_t fighterKind = 0;
         uint8_t costume = 0;
         uint8_t shade = 0;
+        uint32_t frame = 0;
+        uint64_t stateHash = 0;
+        MatchResultPayload matchResult{};
         PortNetplayMatchConfig matchConfig{};
         NetplayMode mode = NetplayMode::None;
     };
@@ -163,10 +194,31 @@ private:
     bool mStartMatchReceived = false;
     int mMatchStartCountdown = -1;
 
+    struct StateHashSample {
+        uint32_t frame = 0;
+        uint64_t hash = 0;
+        bool valid = false;
+    };
+    static constexpr std::size_t kStateHashHistory = 64;
+    std::array<StateHashSample, kStateHashHistory> mLocalStateHashes{};
+    std::array<std::array<StateHashSample, kStateHashHistory>, kMaxPlayers> mRemoteStateHashes{};
+    uint32_t mDeterminismMismatchCount = 0;
+    uint32_t mFirstDeterminismMismatchFrame = UINT32_MAX;
+    uint32_t mMatchId = 0;
+    uint8_t mMatchParticipantMask = 0;
+    MatchResultPayload mLocalMatchResult{};
+    MatchResultPayload mAuthoritativeMatchResult{};
+    bool mLocalMatchResultValid = false;
+    bool mAuthoritativeMatchResultValid = false;
+    uint32_t mResultMismatchCount = 0;
+    std::string mGameplayHostEndpoint;
+    std::atomic<int> mResolvedInputDelay{1};
+
     // Worker-thread-owned network services. Socket I/O never runs on the game
     // or render thread; the UI only sees copies published under mMutex.
     LanDiscovery mDiscovery;
     LobbySession mLobby;
+    GameplaySession mGameplay;
 };
 
 } // namespace ssb64::netplay
@@ -217,5 +269,7 @@ void port_netplay_lobby_start(void);
 void port_netplay_get_lobby_message(char* out, int out_size);
 int port_netplay_get_protocol_version(void);
 void port_netplay_get_build_id(char* out, int out_size);
+void port_netplay_submit_state_hash(uint32_t frame, uint32_t hash_high, uint32_t hash_low);
+uint32_t port_netplay_get_determinism_mismatch_count(void);
 
 }

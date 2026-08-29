@@ -79,7 +79,7 @@ static int LogLineIsPriority(const char *line)
 		"_REJECT", "_MISMATCH", "_STALE_DROP", " OVERFLOW",
 		"_OOB", "UNDERFLOW", "QUARANTINE", "ABORT", "ANOMALY",
 		"WARNING", "CAUGHT", " FAIL", "ERROR", "TASK_SEAL",
-		"FAST3D_SCENE", "VITA_SCENE_RENDER"
+		"FAST3D_SCENE", "VITA_SCENE_RENDER", "[NETPLAY]"
 	};
 	size_t i;
 

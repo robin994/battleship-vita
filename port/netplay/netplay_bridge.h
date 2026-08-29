@@ -27,6 +27,24 @@ typedef struct PortNetplayMatchConfig {
     uint8_t shades[4];
 } PortNetplayMatchConfig;
 
+typedef struct PortNetplayMatchResult {
+    uint32_t final_frame;
+    uint8_t winner;
+    uint8_t placements[4];
+    int8_t stocks_remaining[4];
+    uint8_t reason;
+    uint8_t has_final_hash;
+    uint32_t final_hash_high;
+    uint32_t final_hash_low;
+} PortNetplayMatchResult;
+
+enum {
+    PORT_NETPLAY_RESULT_COMPLETED = 0,
+    PORT_NETPLAY_RESULT_NO_CONTEST,
+    PORT_NETPLAY_RESULT_PEER_DISCONNECTED,
+    PORT_NETPLAY_RESULT_DESYNC_ABORT
+};
+
 enum {
     PORT_NETPLAY_STATE_OFFLINE = 0,
     PORT_NETPLAY_STATE_DISCOVERING,
@@ -117,6 +135,25 @@ void port_netplay_css_host_commit_match(const PortNetplayMatchConfig* config);
 int port_netplay_get_match_config(PortNetplayMatchConfig* out_config);
 void port_netplay_loading_ready(void);
 int port_netplay_match_gate_tick(void);
+void port_netplay_submit_state_hash(uint32_t frame, uint32_t hash_high, uint32_t hash_low);
+uint32_t port_netplay_get_determinism_mismatch_count(void);
+int port_netplay_gameplay_active(void);
+int port_netplay_gameplay_get_input_delay(void);
+int port_netplay_gameplay_slot_connected(int slot);
+void port_netplay_gameplay_submit_input(uint32_t frame, uint16_t buttons, int8_t stick_x, int8_t stick_y);
+void port_netplay_gameplay_abort_desync(uint32_t mismatch_frame, uint32_t current_frame, int reason);
+void port_netplay_gameplay_match_finished(const PortNetplayMatchResult* result);
+void port_netplay_results_rematch(void);
+void port_netplay_results_character_select(void);
+void port_netplay_results_leave(void);
+uint32_t port_netplay_results_mismatch_count(void);
+int port_netplay_gameplay_consume_input(int* player, uint32_t* frame, uint16_t* buttons,
+                                        int8_t* stick_x, int8_t* stick_y);
+void port_netplay_gameplay_get_transport_stats(uint32_t* ping_ms, uint32_t* jitter_ms,
+                                                uint32_t* packets_sent, uint32_t* packets_received,
+                                                uint32_t* packets_dropped, uint32_t* sequence_gaps,
+                                                uint32_t* duplicates, uint32_t* out_of_order);
+uint64_t port_netplay_monotonic_us(void);
 
 #ifdef __cplusplus
 }

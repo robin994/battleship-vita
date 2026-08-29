@@ -537,6 +537,7 @@ bool LobbySession::HandleHostPacket(Peer& peer, const DecodedPacket& packet) {
         case PacketType::CharacterUnlocked:
             return QueueSessionEvent(peer, packet, true);
         case PacketType::LoadingReady:
+        case PacketType::StateHash:
             return QueueSessionEvent(peer, packet, false);
         default:
             break;
@@ -627,6 +628,11 @@ bool LobbySession::HandleClientPacket(Peer& peer, const DecodedPacket& packet) {
         case PacketType::CharacterUnlocked:
         case PacketType::MatchConfiguration:
         case PacketType::StartMatch:
+        case PacketType::StateHash:
+        case PacketType::MatchResult:
+        case PacketType::Rematch:
+        case PacketType::ReturnToCharacterSelect:
+        case PacketType::LeaveSession:
             return QueueSessionEvent(peer, packet, false);
         default:
             break;
