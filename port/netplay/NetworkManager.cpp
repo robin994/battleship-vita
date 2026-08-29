@@ -599,27 +599,21 @@ void NetworkManager::ProcessCommands() {
                 ForceTransition(NetplayState::Offline, "network activity cancelled");
                 break;
 
-            case CommandType::GameplayAbort:
-                mGameplay.Stop();
-                {
-                    std::vector<uint8_t> payload;
-                    PayloadWriter writer(payload);
-                    writer.U32(command.frame);
-                    writer.U32(command.sequence);
-                    writer.U8(command.fighterKind);
-                    mLobby.SendSessionMessage(PacketType::Disconnect, payload);
-                    mLobby.Poll();
+            case CommandType::GameplayAbort: {
+                const NetplayState abortState = State();
+                if (abortState != NetplayState::InMatch && abortState != NetplayState::LoadingMatch &&
+                    abortState != NetplayState::CharacterSelect) {
+                    break;
                 }
-                mLobby.Stop(RejectReason::None, false);
-                mDiscovery.Stop();
                 {
                     std::lock_guard<std::mutex> lock(mMutex);
-                    mLastError = "ROLLBACK DESYNC";
+                    mLastError = "DESYNC — RETURNED TO LOBBY";
                 }
-                port_log("[NETPLAY] controlled gameplay abort mismatch=%u current=%u reason=%u\n",
+                port_log("[NETPLAY] desync recovery: returning to lobby mismatch=%u current=%u reason=%u\n",
                          command.frame, command.sequence, static_cast<unsigned>(command.fighterKind));
-                ForceTransition(NetplayState::Disconnected, "rollback window/snapshot failure");
+                ApplyReturnToLobby(true, false);
                 break;
+            }
 
             case CommandType::MatchFinished: {
                 const NetplayState finishState = State();
@@ -1216,6 +1210,10 @@ void NetworkManager::PollNetworkServices() {
 }
 
 void NetworkManager::ApplyReturnToLobby(bool localInitiated, bool toCss) {
+    const NetplayState current = State();
+    if (!toCss && (current == NetplayState::HostingLobby || current == NetplayState::ClientLobby)) {
+        return;
+    }
     mGameplay.Stop();
     std::vector<uint8_t> payload;
     PayloadWriter writer(payload);
