@@ -37,6 +37,9 @@ struct LobbyView {
     LobbyStatus status = LobbyStatus::Open;
     std::array<LobbyPlayerView, kMaxPlayers> players{};
     std::string lastMessage;
+    int8_t ruleStage = -1;
+    int8_t ruleStocks = -1;
+    int8_t ruleTimeUnits = -1;
 };
 
 struct LobbySessionEvent {
@@ -59,6 +62,8 @@ public:
 
     bool SetLocalReady(bool ready);
     bool LocalReady() const;
+    void SetHostRules(int stage, int stocks, int timeUnits);
+    void ReopenLobby();
     bool CanHostStart() const;
     bool StartCharacterSelect();
     bool ConsumeCharacterSelectStart();
@@ -118,6 +123,7 @@ private:
     void RefreshHostStatus();
 
     std::vector<uint8_t> MakeLobbySnapshotPayload(uint8_t assignedPlayer) const;
+    std::vector<uint8_t> MakeLobbyRulesPayload() const;
     bool ApplyLobbySnapshotPayload(const std::vector<uint8_t>& payload);
     void BroadcastPlayerJoined(uint8_t playerId);
     void BroadcastPlayerLeft(uint8_t playerId, RejectReason reason);

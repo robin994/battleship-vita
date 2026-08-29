@@ -47,8 +47,18 @@ void SetOnlineVanillaRuntime(bool enabled) {
 constexpr const char* kPlayerNameCVar = "gNetplay.PlayerName";
 constexpr const char* kInputDelayCVar = "gNetplay.InputDelay";
 constexpr const char* kShowStatsCVar = "gNetplay.ShowStats";
+constexpr const char* kHostStageCVar = "gNetplay.HostStage";
+constexpr const char* kHostStocksCVar = "gNetplay.HostStocks";
+constexpr const char* kHostTimeCVar = "gNetplay.HostTime";
 constexpr int kAutoInputDelay = -1;
 constexpr int kMaxInputDelay = 4;
+constexpr int kHostRuleRandom = -1;
+constexpr int kHostStageMax = 8;
+constexpr int kHostStocksMin = 1;
+constexpr int kHostStocksMax = 5;
+constexpr int kHostTimeInfinite = 0;
+constexpr int kHostTimeUnitMin = 2;
+constexpr int kHostTimeUnitMax = 10;
 constexpr std::size_t kMaxUiPlayerNameChars = 12;
 constexpr auto kWorkerPollInterval = std::chrono::milliseconds(10);
 constexpr auto kPlatformPollInterval = std::chrono::milliseconds(500);
@@ -121,6 +131,7 @@ bool EncodeMatchConfigPayload(uint32_t matchId, const PortNetplayMatchConfig& co
     if (matchId == 0 || config.player_count < 2 || config.player_count > kMaxPlayers ||
         !writer.U32(matchId) || !writer.U32(config.rng_seed) || !writer.U32(config.stage_kind) ||
         !writer.U32(config.stocks) || !writer.U32(config.time_limit) ||
+        !writer.U32(config.time_seconds) ||
         !writer.U32(config.item_switch) || !writer.U32(config.item_toggles) ||
         !writer.U8(config.game_type) || !writer.U8(config.game_rules) ||
         !writer.U8(config.is_team_battle) || !writer.U8(config.handicap) ||
@@ -148,6 +159,7 @@ bool DecodeMatchConfigPayload(const std::vector<uint8_t>& payload, uint32_t& mat
     if (!reader.U32(decodedMatchId) || decodedMatchId == 0 ||
         !reader.U32(decoded.rng_seed) || !reader.U32(decoded.stage_kind) ||
         !reader.U32(decoded.stocks) || !reader.U32(decoded.time_limit) ||
+        !reader.U32(decoded.time_seconds) ||
         !reader.U32(decoded.item_switch) || !reader.U32(decoded.item_toggles) ||
         !reader.U8(decoded.game_type) || !reader.U8(decoded.game_rules) ||
         !reader.U8(decoded.is_team_battle) || !reader.U8(decoded.handicap) ||
@@ -209,6 +221,23 @@ void NetworkManager::LoadSettings() {
         mSettings.inputDelay = kAutoInputDelay;
     }
     mSettings.showStats = CVarGetInteger(kShowStatsCVar, 0) != 0;
+
+    mSettings.hostStage = CVarGetInteger(kHostStageCVar, kHostRuleRandom);
+    if (mSettings.hostStage != kHostRuleRandom &&
+        (mSettings.hostStage < 0 || mSettings.hostStage > kHostStageMax)) {
+        mSettings.hostStage = kHostRuleRandom;
+    }
+    mSettings.hostStocks = CVarGetInteger(kHostStocksCVar, kHostRuleRandom);
+    if (mSettings.hostStocks != kHostRuleRandom &&
+        (mSettings.hostStocks < kHostStocksMin || mSettings.hostStocks > kHostStocksMax)) {
+        mSettings.hostStocks = kHostRuleRandom;
+    }
+    mSettings.hostTimeUnits = CVarGetInteger(kHostTimeCVar, kHostRuleRandom);
+    if (mSettings.hostTimeUnits != kHostRuleRandom && mSettings.hostTimeUnits != kHostTimeInfinite &&
+        (mSettings.hostTimeUnits < kHostTimeUnitMin || mSettings.hostTimeUnits > kHostTimeUnitMax)) {
+        mSettings.hostTimeUnits = kHostRuleRandom;
+    }
+
     mSettingsLoaded = true;
 }
 
@@ -221,6 +250,9 @@ void NetworkManager::SaveSettings() {
     CVarSetString(kPlayerNameCVar, settings.playerName.c_str());
     CVarSetInteger(kInputDelayCVar, settings.inputDelay);
     CVarSetInteger(kShowStatsCVar, settings.showStats ? 1 : 0);
+    CVarSetInteger(kHostStageCVar, settings.hostStage);
+    CVarSetInteger(kHostStocksCVar, settings.hostStocks);
+    CVarSetInteger(kHostTimeCVar, settings.hostTimeUnits);
     CVarSave();
 }
 
@@ -308,6 +340,7 @@ void NetworkManager::WorkerMain() {
         }
 
         ProcessCommands();
+        PushHostRulesToLobby();
 
         if (Mode() != NetplayMode::LocalAdhoc && mAdhocInitialized.load(std::memory_order_acquire)) {
             platform::ShutdownAdhoc();
@@ -691,9 +724,19 @@ void NetworkManager::ProcessCommands() {
                 break;
             }
 
+            case CommandType::ReturnToLobby: {
+                const NetplayState st = State();
+                if (st != NetplayState::CharacterSelect && st != NetplayState::LoadingMatch &&
+                    st != NetplayState::InMatch && st != NetplayState::Results) {
+                    break;
+                }
+                ApplyReturnToLobby(true, command.ready);
+                break;
+            }
+
             case CommandType::ResultsLeave: {
-                if (State() != NetplayState::Results && State() != NetplayState::Disconnected &&
-                    State() != NetplayState::Error) {
+                if (State() == NetplayState::Offline || State() == NetplayState::Discovering ||
+                    State() == NetplayState::Connecting) {
                     break;
                 }
                 mGameplay.Stop();
@@ -1034,6 +1077,14 @@ void NetworkManager::PollNetworkServices() {
             continue;
         }
 
+        if (event.type == PacketType::ReturnToLobby) {
+            uint8_t toCss = 0;
+            PayloadReader reader(event.payload.data(), event.payload.size());
+            if (!reader.U8(toCss)) toCss = 0;
+            ApplyReturnToLobby(false, toCss != 0);
+            continue;
+        }
+
         if (event.type == PacketType::StateHash) {
             if (State() != NetplayState::InMatch || event.sourcePlayerId >= kMaxPlayers) continue;
             uint32_t frame = 0;
@@ -1162,6 +1213,53 @@ void NetworkManager::PollNetworkServices() {
             }
         }
     }
+}
+
+void NetworkManager::ApplyReturnToLobby(bool localInitiated, bool toCss) {
+    mGameplay.Stop();
+    std::vector<uint8_t> payload;
+    PayloadWriter writer(payload);
+    writer.U8(toCss ? 1U : 0U);
+    if (mLobby.IsHost()) {
+        mLobby.SendSessionMessage(PacketType::ReturnToLobby, payload);
+        if (!toCss) mLobby.ReopenLobby();
+        ResetRoundState(true, true);
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            mMatchId = 0;
+            mResultMismatchCount = 0;
+        }
+        ForceTransition(toCss ? NetplayState::CharacterSelect : NetplayState::HostingLobby,
+                        toCss ? "returned to character select" : "returned to host lobby");
+        return;
+    }
+    if (localInitiated) {
+        mLobby.SendSessionMessage(PacketType::ReturnToLobby, payload);
+    }
+    if (!toCss) mLobby.ReopenLobby();
+    ResetRoundState(true, true);
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mMatchId = 0;
+        mResultMismatchCount = 0;
+    }
+    ForceTransition(toCss ? NetplayState::CharacterSelect : NetplayState::ClientLobby,
+                    localInitiated ? "requested round return" : "host round return");
+}
+
+void NetworkManager::PushHostRulesToLobby() {
+    if (!mLobby.IsHost()) return;
+    LoadSettings();
+    int stage;
+    int stocks;
+    int timeUnits;
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        stage = mSettings.hostStage;
+        stocks = mSettings.hostStocks;
+        timeUnits = mSettings.hostTimeUnits;
+    }
+    mLobby.SetHostRules(stage, stocks, timeUnits);
 }
 
 void NetworkManager::PublishSnapshots() {
@@ -1362,6 +1460,55 @@ void NetworkManager::SetShowStats(bool enabled) {
         mSettings.showStats = enabled;
     }
     SaveSettings();
+}
+
+void NetworkManager::SetHostStage(int stage) {
+    LoadSettings();
+    if (stage != kHostRuleRandom && (stage < 0 || stage > kHostStageMax)) {
+        stage = kHostRuleRandom;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mSettings.hostStage = stage;
+    }
+    SaveSettings();
+}
+
+void NetworkManager::SetHostStocks(int stocks) {
+    LoadSettings();
+    if (stocks != kHostRuleRandom && (stocks < kHostStocksMin || stocks > kHostStocksMax)) {
+        stocks = kHostRuleRandom;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mSettings.hostStocks = stocks;
+    }
+    SaveSettings();
+}
+
+void NetworkManager::SetHostTimeUnits(int units) {
+    LoadSettings();
+    if (units != kHostRuleRandom && units != kHostTimeInfinite &&
+        (units < kHostTimeUnitMin || units > kHostTimeUnitMax)) {
+        units = kHostRuleRandom;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mSettings.hostTimeUnits = units;
+    }
+    SaveSettings();
+}
+
+int NetworkManager::BattleTimeSeconds() const {
+    std::lock_guard<std::mutex> lock(mMutex);
+    return mMatchConfigValid ? static_cast<int>(mMatchConfig.time_seconds) : 0;
+}
+
+bool NetworkManager::BattleIsTimed() const {
+    const NetplayState s = State();
+    if (s != NetplayState::LoadingMatch && s != NetplayState::InMatch) return false;
+    std::lock_guard<std::mutex> lock(mMutex);
+    return mMatchConfigValid && mMatchConfig.time_seconds != 0;
 }
 
 void NetworkManager::ResetSettings() {
@@ -1588,10 +1735,23 @@ void NetworkManager::RequestResultsCharacterSelect() {
     Enqueue(Command{CommandType::ResultsCharacterSelect});
 }
 
+void NetworkManager::RequestReturnToLobby(bool toCss) {
+    const NetplayState state = State();
+    if (state != NetplayState::CharacterSelect && state != NetplayState::LoadingMatch &&
+        state != NetplayState::InMatch && state != NetplayState::Results) {
+        return;
+    }
+    Command command{};
+    command.type = CommandType::ReturnToLobby;
+    command.ready = toCss;
+    Enqueue(command);
+}
+
 void NetworkManager::RequestResultsLeave() {
     const NetplayState state = State();
     if (state != NetplayState::Results && state != NetplayState::Disconnected &&
-        state != NetplayState::Error) {
+        state != NetplayState::Error && state != NetplayState::InMatch &&
+        state != NetplayState::CharacterSelect && state != NetplayState::LoadingMatch) {
         return;
     }
     Enqueue(Command{CommandType::ResultsLeave});
@@ -1686,6 +1846,38 @@ int port_netplay_get_show_stats(void) {
 
 void port_netplay_set_show_stats(int enabled) {
     ssb64::netplay::NetworkManager::Instance().SetShowStats(enabled != 0);
+}
+
+int port_netplay_hostrules_get_stage(void) {
+    return ssb64::netplay::NetworkManager::Instance().Settings().hostStage;
+}
+
+void port_netplay_hostrules_set_stage(int stage) {
+    ssb64::netplay::NetworkManager::Instance().SetHostStage(stage);
+}
+
+int port_netplay_hostrules_get_stocks(void) {
+    return ssb64::netplay::NetworkManager::Instance().Settings().hostStocks;
+}
+
+void port_netplay_hostrules_set_stocks(int stocks) {
+    ssb64::netplay::NetworkManager::Instance().SetHostStocks(stocks);
+}
+
+int port_netplay_hostrules_get_time(void) {
+    return ssb64::netplay::NetworkManager::Instance().Settings().hostTimeUnits;
+}
+
+void port_netplay_hostrules_set_time(int units) {
+    ssb64::netplay::NetworkManager::Instance().SetHostTimeUnits(units);
+}
+
+int port_netplay_battle_time_seconds(void) {
+    return ssb64::netplay::NetworkManager::Instance().BattleTimeSeconds();
+}
+
+int port_netplay_battle_is_timed(void) {
+    return ssb64::netplay::NetworkManager::Instance().BattleIsTimed() ? 1 : 0;
 }
 
 void port_netplay_reset_settings(void) {
@@ -1799,6 +1991,18 @@ int port_netplay_lobby_is_connected(void) {
 
 int port_netplay_lobby_get_status(void) {
     return static_cast<int>(ssb64::netplay::NetworkManager::Instance().Lobby().status);
+}
+
+int port_netplay_lobby_get_rule_stage(void) {
+    return ssb64::netplay::NetworkManager::Instance().Lobby().ruleStage;
+}
+
+int port_netplay_lobby_get_rule_stocks(void) {
+    return ssb64::netplay::NetworkManager::Instance().Lobby().ruleStocks;
+}
+
+int port_netplay_lobby_get_rule_time(void) {
+    return ssb64::netplay::NetworkManager::Instance().Lobby().ruleTimeUnits;
 }
 
 int port_netplay_lobby_get_local_player(void) {
@@ -2001,6 +2205,18 @@ void port_netplay_results_rematch(void) {
 
 void port_netplay_results_character_select(void) {
     ssb64::netplay::NetworkManager::Instance().RequestResultsCharacterSelect();
+}
+
+void port_netplay_return_to_lobby(void) {
+    ssb64::netplay::NetworkManager::Instance().RequestReturnToLobby(false);
+}
+
+void port_netplay_ingame_return_css(void) {
+    ssb64::netplay::NetworkManager::Instance().RequestReturnToLobby(true);
+}
+
+void port_netplay_ingame_leave(void) {
+    ssb64::netplay::NetworkManager::Instance().RequestResultsLeave();
 }
 
 void port_netplay_results_leave(void) {

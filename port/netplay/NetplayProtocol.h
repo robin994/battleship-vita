@@ -47,6 +47,8 @@ enum class PacketType : uint16_t {
     Rematch,
     ReturnToCharacterSelect,
     LeaveSession,
+    LobbyRules,
+    ReturnToLobby,
 };
 
 enum class NetplayState : uint8_t {

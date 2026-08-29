@@ -7,6 +7,7 @@ typedef struct PortNetplayMatchConfig {
     uint32_t stage_kind;
     uint32_t stocks;
     uint32_t time_limit;
+    uint32_t time_seconds;
     uint32_t item_switch;
     uint32_t item_toggles;
     uint8_t game_type;
@@ -91,6 +92,14 @@ int port_netplay_get_input_delay(void);
 void port_netplay_set_input_delay(int frames);
 int port_netplay_get_show_stats(void);
 void port_netplay_set_show_stats(int enabled);
+int port_netplay_hostrules_get_stage(void);
+void port_netplay_hostrules_set_stage(int stage);
+int port_netplay_hostrules_get_stocks(void);
+void port_netplay_hostrules_set_stocks(int stocks);
+int port_netplay_hostrules_get_time(void);
+void port_netplay_hostrules_set_time(int units);
+int port_netplay_battle_time_seconds(void);
+int port_netplay_battle_is_timed(void);
 void port_netplay_reset_settings(void);
 void port_netplay_set_mode(int mode);
 int port_netplay_get_mode(void);
@@ -111,6 +120,9 @@ int port_netplay_get_discovery_lobby(int index, char* host_name, int host_name_s
 int port_netplay_lobby_is_host(void);
 int port_netplay_lobby_is_connected(void);
 int port_netplay_lobby_get_status(void);
+int port_netplay_lobby_get_rule_stage(void);
+int port_netplay_lobby_get_rule_stocks(void);
+int port_netplay_lobby_get_rule_time(void);
 int port_netplay_lobby_get_local_player(void);
 int port_netplay_lobby_get_player_count(void);
 int port_netplay_lobby_get_slot(int slot, char* player_name, int player_name_size,
@@ -146,6 +158,9 @@ void port_netplay_gameplay_match_finished(const PortNetplayMatchResult* result);
 void port_netplay_results_rematch(void);
 void port_netplay_results_character_select(void);
 void port_netplay_results_leave(void);
+void port_netplay_return_to_lobby(void);
+void port_netplay_ingame_return_css(void);
+void port_netplay_ingame_leave(void);
 uint32_t port_netplay_results_mismatch_count(void);
 int port_netplay_gameplay_consume_input(int* player, uint32_t* frame, uint16_t* buttons,
                                         int8_t* stick_x, int8_t* stick_y);

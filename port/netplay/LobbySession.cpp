@@ -538,6 +538,7 @@ bool LobbySession::HandleHostPacket(Peer& peer, const DecodedPacket& packet) {
             return QueueSessionEvent(peer, packet, true);
         case PacketType::LoadingReady:
         case PacketType::StateHash:
+        case PacketType::ReturnToLobby:
             return QueueSessionEvent(peer, packet, false);
         default:
             break;
@@ -614,6 +615,18 @@ bool LobbySession::HandleClientPacket(Peer& peer, const DecodedPacket& packet) {
         return true;
     }
 
+    if (packet.header.type == PacketType::LobbyRules) {
+        uint8_t stage = 0xFF;
+        uint8_t stocks = 0xFF;
+        uint8_t timeUnits = 0xFF;
+        PayloadReader reader(packet.payload.data(), packet.payload.size());
+        if (!reader.U8(stage) || !reader.U8(stocks) || !reader.U8(timeUnits) || !reader.Empty()) return false;
+        mView.ruleStage = static_cast<int8_t>(stage);
+        mView.ruleStocks = static_cast<int8_t>(stocks);
+        mView.ruleTimeUnits = static_cast<int8_t>(timeUnits);
+        return true;
+    }
+
     if (packet.header.type == PacketType::StartCharacterSelect) {
         mView.status = LobbyStatus::Starting;
         mCharacterSelectStartPending = true;
@@ -633,6 +646,7 @@ bool LobbySession::HandleClientPacket(Peer& peer, const DecodedPacket& packet) {
         case PacketType::Rematch:
         case PacketType::ReturnToCharacterSelect:
         case PacketType::LeaveSession:
+        case PacketType::ReturnToLobby:
             return QueueSessionEvent(peer, packet, false);
         default:
             break;
@@ -687,6 +701,7 @@ bool LobbySession::HandleJoinRequest(Peer& peer, const DecodedPacket& packet) {
 
     const std::vector<uint8_t> snapshot = MakeLobbySnapshotPayload(peer.playerId);
     QueuePacket(peer, PacketType::JoinAccept, 0, snapshot);
+    QueuePacket(peer, PacketType::LobbyRules, 0, MakeLobbyRulesPayload());
     BroadcastPlayerJoined(peer.playerId);
     port_log("[NETPLAY] player joined slot=P%u name=%s ip=%s players=%u/%u\n",
              peer.playerId + 1, mView.players[slot].name.c_str(), mView.players[slot].ip.c_str(),
@@ -808,6 +823,46 @@ void LobbySession::BroadcastReady(uint8_t playerId) {
     writer.U8(playerId);
     writer.U8(mView.players[playerId].state == LobbySlotState::Ready ? 1 : 0);
     Broadcast(PacketType::ReadyState, 0, payload);
+}
+
+std::vector<uint8_t> LobbySession::MakeLobbyRulesPayload() const {
+    std::vector<uint8_t> payload;
+    PayloadWriter writer(payload);
+    writer.U8(static_cast<uint8_t>(mView.ruleStage));
+    writer.U8(static_cast<uint8_t>(mView.ruleStocks));
+    writer.U8(static_cast<uint8_t>(mView.ruleTimeUnits));
+    return payload;
+}
+
+void LobbySession::ReopenLobby() {
+    mCharacterSelectStartPending = false;
+    mView.status = LobbyStatus::Open;
+    for (uint8_t i = 0; i < kMaxPlayers; ++i) {
+        if (mView.players[i].state == LobbySlotState::Ready) {
+            mView.players[i].state = LobbySlotState::Connected;
+        }
+    }
+    if (mMode == Mode::Host) {
+        RefreshHostStatus();
+        BroadcastReady(0);
+        for (const Peer& peer : mHostPeers) {
+            if (peer.socket != transport::kInvalidSocket && peer.joined && peer.playerId < kMaxPlayers) {
+                BroadcastReady(peer.playerId);
+            }
+        }
+    }
+}
+
+void LobbySession::SetHostRules(int stage, int stocks, int timeUnits) {
+    if (mMode != Mode::Host) return;
+    const int8_t s = static_cast<int8_t>(stage);
+    const int8_t k = static_cast<int8_t>(stocks);
+    const int8_t t = static_cast<int8_t>(timeUnits);
+    if (mView.ruleStage == s && mView.ruleStocks == k && mView.ruleTimeUnits == t) return;
+    mView.ruleStage = s;
+    mView.ruleStocks = k;
+    mView.ruleTimeUnits = t;
+    Broadcast(PacketType::LobbyRules, 0, MakeLobbyRulesPayload());
 }
 
 bool LobbySession::SetLocalReady(bool ready) {

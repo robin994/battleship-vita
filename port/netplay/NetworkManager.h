@@ -22,6 +22,9 @@ struct NetplaySettings {
     std::string playerName = "PLAYER";
     int inputDelay = -1; // -1 = AUTO, otherwise 0..4 frames
     bool showStats = false;
+    int hostStage = -1;
+    int hostStocks = -1;
+    int hostTimeUnits = -1;
 };
 
 class NetworkManager {
@@ -48,6 +51,11 @@ public:
     void SetPlayerName(const std::string& name);
     void SetInputDelay(int frames);
     void SetShowStats(bool enabled);
+    void SetHostStage(int stage);
+    void SetHostStocks(int stocks);
+    void SetHostTimeUnits(int units);
+    int BattleTimeSeconds() const;
+    bool BattleIsTimed() const;
     void ResetSettings();
     void SetMode(NetplayMode mode);
     bool ModeReady() const;
@@ -78,6 +86,7 @@ public:
     void RequestResultsRematch();
     void RequestResultsCharacterSelect();
     void RequestResultsLeave();
+    void RequestReturnToLobby(bool toCss);
     uint32_t ResultMismatchCount() const;
     bool ConsumeGameplayInput(GameplayFrameInput& input);
     GameplayStats GameplayTransportStats() const { return mGameplay.Stats(); }
@@ -106,6 +115,8 @@ private:
     void PublishSnapshots();
     uint32_t MakeSessionId() const;
     bool StartGameplayTransport(int forcedDelay = -1);
+    void PushHostRulesToLobby();
+    void ApplyReturnToLobby(bool localInitiated, bool toCss);
     int ResolveInputDelay(const LobbyView& lobby) const;
     void ResetRoundState(bool clearMatchConfig, bool clearCssState);
     uint32_t NextRematchSeed(uint32_t nextMatchId) const;
@@ -132,6 +143,7 @@ private:
         ResultsRematch,
         ResultsCharacterSelect,
         ResultsLeave,
+        ReturnToLobby,
         SetMode,
     };
 

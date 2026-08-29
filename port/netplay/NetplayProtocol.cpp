@@ -44,7 +44,7 @@ uint32_t Accumulate(uint32_t hash, const uint8_t* data, std::size_t size) {
 
 bool IsKnownPacketType(uint16_t raw) {
     return raw >= static_cast<uint16_t>(PacketType::DiscoveryRequest) &&
-           raw <= static_cast<uint16_t>(PacketType::LeaveSession);
+           raw <= static_cast<uint16_t>(PacketType::ReturnToLobby);
 }
 
 } // namespace
@@ -336,6 +336,8 @@ const char* PacketTypeName(PacketType type) {
         case PacketType::Rematch: return "REMATCH";
         case PacketType::ReturnToCharacterSelect: return "RETURN_TO_CHARACTER_SELECT";
         case PacketType::LeaveSession: return "LEAVE_SESSION";
+        case PacketType::LobbyRules: return "LOBBY_RULES";
+        case PacketType::ReturnToLobby: return "RETURN_TO_LOBBY";
     }
     return "UNKNOWN";
 }
