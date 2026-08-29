@@ -25,6 +25,7 @@ struct NetplaySettings {
     int hostStage = -1;
     int hostStocks = -1;
     int hostTimeUnits = -1;
+    std::string joinAddress = "";
 };
 
 class NetworkManager {
@@ -64,6 +65,8 @@ public:
     void RefreshDiscovery();
     void HostLobby();
     bool JoinDiscoveredLobby(std::size_t index);
+    bool JoinByAddress(const std::string& ip);
+    std::string JoinAddress() const;
     void CancelNetworkActivity();
     void ToggleLocalReady();
     void RequestStartCharacterSelect();

@@ -50,6 +50,7 @@ constexpr const char* kShowStatsCVar = "gNetplay.ShowStats";
 constexpr const char* kHostStageCVar = "gNetplay.HostStage";
 constexpr const char* kHostStocksCVar = "gNetplay.HostStocks";
 constexpr const char* kHostTimeCVar = "gNetplay.HostTime";
+constexpr const char* kJoinAddressCVar = "gNetplay.JoinAddress";
 constexpr int kAutoInputDelay = -1;
 constexpr int kMaxInputDelay = 4;
 constexpr int kHostRuleRandom = -1;
@@ -238,6 +239,9 @@ void NetworkManager::LoadSettings() {
         mSettings.hostTimeUnits = kHostRuleRandom;
     }
 
+    const char* storedJoin = CVarGetString(kJoinAddressCVar, "");
+    mSettings.joinAddress = storedJoin != nullptr ? storedJoin : "";
+
     mSettingsLoaded = true;
 }
 
@@ -253,6 +257,7 @@ void NetworkManager::SaveSettings() {
     CVarSetInteger(kHostStageCVar, settings.hostStage);
     CVarSetInteger(kHostStocksCVar, settings.hostStocks);
     CVarSetInteger(kHostTimeCVar, settings.hostTimeUnits);
+    CVarSetString(kJoinAddressCVar, settings.joinAddress.c_str());
     CVarSave();
 }
 
@@ -1573,6 +1578,34 @@ bool NetworkManager::JoinDiscoveredLobby(std::size_t index) {
     return true;
 }
 
+bool NetworkManager::JoinByAddress(const std::string& ip) {
+    transport::SocketAddress parsed;
+    if (!transport::ParseIpv4(ip, kLobbyPort, parsed)) {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mLastError = "INVALID IP ADDRESS";
+        return false;
+    }
+    LoadSettings();
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mSettings.joinAddress = ip;
+    }
+    SaveSettings();
+
+    Command command{};
+    command.type = CommandType::JoinLobby;
+    command.hostIp = ip;
+    command.sessionId = 0;
+    Enqueue(std::move(command));
+    port_log("[NETPLAY] direct connect requested host=%s\n", ip.c_str());
+    return true;
+}
+
+std::string NetworkManager::JoinAddress() const {
+    std::lock_guard<std::mutex> lock(mMutex);
+    return mSettings.joinAddress;
+}
+
 void NetworkManager::CancelNetworkActivity() {
     Enqueue(Command{CommandType::CancelActivity});
 }
@@ -1828,6 +1861,15 @@ void port_netplay_get_player_name(char* out, int out_size) {
 
 void port_netplay_set_player_name(const char* name) {
     ssb64::netplay::NetworkManager::Instance().SetPlayerName(name != nullptr ? name : "PLAYER");
+}
+
+int port_netplay_join_address(const char* ip) {
+    if (ip == nullptr) return 0;
+    return ssb64::netplay::NetworkManager::Instance().JoinByAddress(ip) ? 1 : 0;
+}
+
+void port_netplay_get_join_address(char* out, int out_size) {
+    ssb64::netplay::CopyStringOut(ssb64::netplay::NetworkManager::Instance().JoinAddress(), out, out_size);
 }
 
 int port_netplay_get_input_delay(void) {

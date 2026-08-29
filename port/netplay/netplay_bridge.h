@@ -111,6 +111,8 @@ void port_netplay_start_discovery(void);
 void port_netplay_refresh_discovery(void);
 void port_netplay_host_lobby(void);
 int port_netplay_join_discovered_lobby(int index);
+int port_netplay_join_address(const char* ip);
+void port_netplay_get_join_address(char* out, int out_size);
 void port_netplay_cancel_activity(void);
 int port_netplay_get_discovery_count(void);
 int port_netplay_get_discovery_lobby(int index, char* host_name, int host_name_size,
