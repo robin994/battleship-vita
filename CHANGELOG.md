@@ -68,7 +68,9 @@ triggers):
 
 - The D-pad and right-stick behaviour is forced from `sceCtrl` directly, so it
   applies even if you have an old saved controller-binding config.
-- Bindings are still fully remappable in the in-game controller menu.
+- The in-game controller editor is disabled on Vita; remap by hand in
+  `ux0:data/battleship/BattleShip.cfg.json` (see the README "Controls (PS Vita)"
+  section).
 
 ### Classic / 1P Mode
 

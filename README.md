@@ -276,12 +276,13 @@ Default layout, modelled on the SSB64 3DS port (the Vita has no analog triggers)
 | D-pad | menu navigation; in gameplay it emulates the left stick (up/down = jump/crouch, tap left/right = walk, double-tap = dash) | forced by the port |
 | Select | opens the in-game menu | |
 
-**Remapping in-game (recommended).** Press **Select** to open the menu, then
-*Settings → Controllers*. Changes are saved to the config file automatically.
+**Remapping.** The in-game controller editor is disabled on the Vita build (its
+"press a button" capture flow doesn't work with the port's `sceCtrl`-forced
+input), so remapping is done by hand in the config file.
 
-**Remapping by hand.** The bindings live in
-`ux0:data/battleship/BattleShip.cfg.json` (created on first launch). Pull it over
-FTP with vitacompanion, edit, push it back, relaunch. It must stay valid JSON.
+The bindings live in `ux0:data/battleship/BattleShip.cfg.json` (created on first
+launch). Pull it over FTP with vitacompanion, edit, push it back, relaunch. It
+must stay valid JSON.
 
 The button bindings are under `CVars → gControllers → ButtonMappings`. Each entry
 looks like:
