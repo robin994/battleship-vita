@@ -15,6 +15,7 @@ constexpr uint16_t kProtocolVersion = 1;
 constexpr uint16_t kDiscoveryPort = 26040;
 constexpr uint16_t kLobbyPort = 26041;
 constexpr uint16_t kGameplayPort = 26042;
+constexpr uint16_t kRendezvousPort = 26050;
 constexpr std::size_t kMaxPlayers = 4;
 constexpr std::size_t kMaxPlayerNameBytes = 16;
 constexpr std::size_t kMaxPayloadBytes = 768;

@@ -9,6 +9,8 @@ SOURCES := \
 	$(ROOT)/port/netplay/GameplaySession.cpp \
 	$(ROOT)/port/netplay/LanDiscovery.cpp \
 	$(ROOT)/port/netplay/LobbySession.cpp \
+	$(ROOT)/port/netplay/RendezvousClient.cpp \
+	$(ROOT)/port/vita/VitaNetResolver.cpp \
 	$(ROOT)/port/vita/VitaNetworkTransport.cpp
 
 .PHONY: all run clean

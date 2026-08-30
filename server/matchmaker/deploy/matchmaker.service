@@ -1,0 +1,19 @@
+[Unit]
+Description=SSB64 Vita netplay lobby board
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/matchmaker/matchmaker -tcp :26050 -build 1.3
+DynamicUser=yes
+Restart=always
+RestartSec=1
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+AmbientCapabilities=
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

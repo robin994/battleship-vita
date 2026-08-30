@@ -2,7 +2,16 @@
 #include "../../port/netplay/GameplaySession.h"
 #include "../../port/netplay/LobbySession.h"
 #include "../../port/netplay/NetplayProtocol.h"
+#include "../../port/netplay/RendezvousClient.h"
 #include "../../port/vita/VitaNetworkTransport.h"
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <atomic>
+#include <cstdint>
+#include <mutex>
 #define PORT 1
 #define _LANGUAGE_C_PLUS_PLUS 1
 #include <sys/netinput.h>
@@ -751,6 +760,282 @@ void TestAdhocModeSessionFallback() {
     client.Stop(RejectReason::None, false);
 }
 
+// --- rendezvous lobby-board mock + test ---------------------------------------
+
+class MockBoard {
+public:
+    void Start() {
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        Require(fd >= 0, "mock board socket");
+        int one = 1;
+        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        sockaddr_in sa{};
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        sa.sin_port = 0;
+        Require(::bind(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) == 0, "mock board bind");
+        Require(::listen(fd, 8) == 0, "mock board listen");
+        socklen_t len = sizeof(sa);
+        ::getsockname(fd, reinterpret_cast<sockaddr*>(&sa), &len);
+        mPort = ntohs(sa.sin_port);
+        mListen.store(fd);
+        mAccept = std::thread([this] { AcceptLoop(); });
+    }
+
+    uint16_t Port() const { return mPort; }
+
+    void Stop() {
+        mStop.store(true);
+        const int fd = mListen.exchange(-1);
+        if (fd >= 0) {
+            ::shutdown(fd, SHUT_RDWR);
+            ::close(fd);
+        }
+        if (mAccept.joinable()) mAccept.join();
+        for (std::thread& t : mWorkers) {
+            if (t.joinable()) t.join();
+        }
+    }
+
+private:
+    struct Rec {
+        uint32_t id;
+        std::string ip;
+        uint16_t lobbyPort;
+        uint16_t gameplayPort;
+        uint32_t bsnp;
+        std::string name;
+        uint8_t players;
+        uint8_t max;
+        uint8_t status;
+        std::string build;
+        bool alive;
+    };
+
+    static bool ReadN(int fd, uint8_t* buf, std::size_t n) {
+        std::size_t got = 0;
+        while (got < n) {
+            const ssize_t r = ::recv(fd, buf + got, n - got, 0);
+            if (r <= 0) return false;
+            got += static_cast<std::size_t>(r);
+        }
+        return true;
+    }
+    static bool ReadFrame(int fd, uint8_t& op, std::vector<uint8_t>& body) {
+        uint8_t lenb[4];
+        if (!ReadN(fd, lenb, 4)) return false;
+        const uint32_t len = (uint32_t(lenb[0]) << 24) | (uint32_t(lenb[1]) << 16) |
+                             (uint32_t(lenb[2]) << 8) | lenb[3];
+        if (len == 0 || len > 512) return false;
+        std::vector<uint8_t> buf(len);
+        if (!ReadN(fd, buf.data(), len)) return false;
+        op = buf[0];
+        body.assign(buf.begin() + 1, buf.end());
+        return true;
+    }
+    static void WriteFrame(int fd, uint8_t op, const std::vector<uint8_t>& body) {
+        std::vector<uint8_t> f;
+        const uint32_t total = 1 + static_cast<uint32_t>(body.size());
+        f.push_back(uint8_t(total >> 24));
+        f.push_back(uint8_t(total >> 16));
+        f.push_back(uint8_t(total >> 8));
+        f.push_back(uint8_t(total));
+        f.push_back(op);
+        f.insert(f.end(), body.begin(), body.end());
+        ::send(fd, f.data(), f.size(), 0);
+    }
+
+    struct Reader {
+        const uint8_t* p;
+        std::size_t n;
+        std::size_t pos = 0;
+        uint8_t u8() { return pos < n ? p[pos++] : 0; }
+        uint16_t u16() {
+            const uint16_t a = u8();
+            const uint16_t b = u8();
+            return uint16_t((a << 8) | b);
+        }
+        uint32_t u32() {
+            const uint32_t a = u8(), b = u8(), c = u8(), d = u8();
+            return (a << 24) | (b << 16) | (c << 8) | d;
+        }
+        std::string str() {
+            const uint16_t l = u16();
+            std::string s;
+            for (uint16_t i = 0; i < l && pos < n; ++i) s.push_back(char(p[pos++]));
+            return s;
+        }
+    };
+    static void PutU16(std::vector<uint8_t>& b, uint16_t v) {
+        b.push_back(uint8_t(v >> 8));
+        b.push_back(uint8_t(v));
+    }
+    static void PutU32(std::vector<uint8_t>& b, uint32_t v) {
+        b.push_back(uint8_t(v >> 24));
+        b.push_back(uint8_t(v >> 16));
+        b.push_back(uint8_t(v >> 8));
+        b.push_back(uint8_t(v));
+    }
+    static void PutStr(std::vector<uint8_t>& b, const std::string& s) {
+        PutU16(b, uint16_t(s.size()));
+        b.insert(b.end(), s.begin(), s.end());
+    }
+
+    void AcceptLoop() {
+        while (!mStop.load()) {
+            const int listen = mListen.load();
+            if (listen < 0) return;
+            const int fd = ::accept(listen, nullptr, nullptr);
+            if (fd < 0) return;
+            mWorkers.emplace_back([this, fd] { Handle(fd); });
+        }
+    }
+
+    void Handle(int fd) {
+        uint8_t op = 0;
+        std::vector<uint8_t> body;
+        if (!ReadFrame(fd, op, body)) {
+            ::close(fd);
+            return;
+        }
+        Reader r{body.data(), body.size()};
+        if (op == 0x02) { // REGISTER
+            r.str();
+            const std::string build = r.str();
+            const std::string name = r.str();
+            const uint8_t max = r.u8();
+            const uint16_t lp = r.u16();
+            const uint16_t gp = r.u16();
+            const uint32_t bsnp = r.u32();
+            uint32_t id;
+            {
+                std::lock_guard<std::mutex> lock(mMu);
+                id = ++mNextId;
+                mLobbies.push_back({id, "127.0.0.1", lp, gp, bsnp, name, 1, max, 0, build, true});
+            }
+            std::vector<uint8_t> reply;
+            PutU32(reply, id);
+            WriteFrame(fd, 0x83, reply);
+            for (;;) {
+                if (!ReadFrame(fd, op, body)) break;
+                if (op == 0x05) {
+                    WriteFrame(fd, 0x06, {});
+                } else if (op == 0x04) {
+                    std::lock_guard<std::mutex> lock(mMu);
+                    for (Rec& rec : mLobbies) {
+                        if (rec.id == id && body.size() >= 2) {
+                            rec.players = body[0];
+                            rec.status = body[1];
+                        }
+                    }
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lock(mMu);
+                for (Rec& rec : mLobbies) {
+                    if (rec.id == id) rec.alive = false;
+                }
+            }
+            ::close(fd);
+        } else if (op == 0x01) { // LIST
+            r.str();
+            const std::string build = r.str();
+            std::vector<Rec> snap;
+            {
+                std::lock_guard<std::mutex> lock(mMu);
+                for (const Rec& rec : mLobbies) {
+                    if (rec.alive && (build.empty() || rec.build == build)) snap.push_back(rec);
+                }
+            }
+            for (const Rec& rec : snap) {
+                std::vector<uint8_t> e;
+                PutU32(e, rec.id);
+                PutStr(e, rec.ip);
+                PutU16(e, rec.lobbyPort);
+                PutU16(e, rec.gameplayPort);
+                PutU32(e, rec.bsnp);
+                PutStr(e, rec.name);
+                e.push_back(rec.players);
+                e.push_back(rec.max);
+                e.push_back(rec.status);
+                PutStr(e, rec.build);
+                WriteFrame(fd, 0x81, e);
+            }
+            WriteFrame(fd, 0x82, {});
+            ::close(fd);
+        } else {
+            ::close(fd);
+        }
+    }
+
+    std::atomic<int> mListen{-1};
+    uint16_t mPort = 0;
+    std::atomic<bool> mStop{false};
+    std::thread mAccept;
+    std::vector<std::thread> mWorkers;
+    std::mutex mMu;
+    std::vector<Rec> mLobbies;
+    uint32_t mNextId = 0x1000;
+};
+
+void TestRendezvousBoard() {
+    MockBoard board;
+    board.Start();
+    const std::string endpoint = "127.0.0.1:" + std::to_string(board.Port());
+
+    RendezvousClient host;
+    host.SetServer(endpoint);
+    host.StartHost("HOSTX", "1.3", 2, kLobbyPort, kGameplayPort, 0xABCD1234U);
+    Require(WaitFor([&] { return host.HostRegistered(); }, [&] { host.Poll(); }),
+            "rendezvous host register");
+
+    RendezvousClient client;
+    client.SetServer(endpoint);
+    client.StartList("1.3");
+    Require(WaitFor([&] { return !client.Lobbies().empty(); },
+                    [&] { host.Poll(); client.Poll(); }, 3000),
+            "rendezvous list fetch");
+
+    const std::vector<DiscoveredLobby> lobbies = client.Lobbies();
+    Require(lobbies.size() == 1, "rendezvous one lobby");
+    Require(lobbies[0].hostIp == "127.0.0.1", "rendezvous lobby ip");
+    Require(lobbies[0].sessionId == 0xABCD1234U, "rendezvous lobby session id");
+    Require(lobbies[0].hostName == "HOSTX", "rendezvous lobby name");
+    Require(lobbies[0].compatible, "rendezvous lobby compatible");
+    Require(lobbies[0].playerCount == 1, "rendezvous lobby player count");
+
+    RendezvousClient other;
+    other.SetServer(endpoint);
+    other.StartList("9.9");
+    Require(WaitFor([&] {
+        other.RequestList();
+        host.Poll();
+        other.Poll();
+        return true;
+    }, [&] {}, 500), "rendezvous other-build tick");
+    Require(other.Lobbies().empty(), "rendezvous build filter");
+    other.Stop();
+
+    host.UpdateStatus(2, 1);
+    Require(WaitFor([&] {
+        client.RequestList();
+        host.Poll();
+        client.Poll();
+        const std::vector<DiscoveredLobby> l = client.Lobbies();
+        return !l.empty() && l[0].playerCount == 2 && l[0].status == LobbyStatus::InGame;
+    }, [&] {}, 4000), "rendezvous status update");
+
+    host.Stop();
+    Require(WaitFor([&] {
+        client.RequestList();
+        client.Poll();
+        return client.Lobbies().empty();
+    }, [&] {}, 5000), "rendezvous lobby removed on host stop");
+
+    client.Stop();
+    board.Stop();
+}
+
 } // namespace
 
 int main() {
@@ -767,6 +1052,7 @@ int main() {
     TestGameplayLossDuplicateAndReorder();
     TestPostMatchControlLifecycle();
     TestAdhocModeSessionFallback();
+    TestRendezvousBoard();
     std::puts("netplay loopback tests: PASS");
     return 0;
 }
