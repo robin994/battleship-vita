@@ -259,6 +259,92 @@ three minutes and shows a progress bar; successful programs are then cached to
 instead of recompiling. Don't interrupt the app during this window — let the
 progress bar finish once.
 
+### Controls (PS Vita)
+
+Default layout, modelled on the SSB64 3DS port (the Vita has no analog triggers):
+
+| Physical | N64 | Notes |
+|---|---|---|
+| Circle | A — attack | |
+| Cross | B — special | |
+| Triangle / Square | C-Up / C-Left (jump) | |
+| L | R-Trigger — grab | |
+| R | Z-Trigger — shield | |
+| Start | Start / pause | |
+| Left stick | N64 control stick | |
+| Right stick | C-buttons; **flick = taunt** in gameplay | forced by the port |
+| D-pad | menu navigation; in gameplay it emulates the left stick (up/down = jump/crouch, tap left/right = walk, double-tap = dash) | forced by the port |
+| Select | opens the in-game menu | |
+
+**Remapping in-game (recommended).** Press **Select** to open the menu, then
+*Settings → Controllers*. Changes are saved to the config file automatically.
+
+**Remapping by hand.** The bindings live in
+`ux0:data/battleship/BattleShip.cfg.json` (created on first launch). Pull it over
+FTP with vitacompanion, edit, push it back, relaunch. It must stay valid JSON.
+
+The button bindings are under `CVars → gControllers → ButtonMappings`. Each entry
+looks like:
+
+```json
+"CVars": {
+  "gControllers": {
+    "ButtonMappings": {
+      "P0-B32768-SDLB1": {
+        "ButtonMappingClass": "SDLButtonToButtonMapping",
+        "Bitmask": 32768,
+        "SDLControllerButton": 1
+      }
+    }
+  }
+}
+```
+
+- `Bitmask` — **which N64 button** this entry drives.
+- `SDLControllerButton` — **which physical Vita button** triggers it.
+- The entry name (`P0-B…-SDLB…`) is just a unique key — **leave it alone**, only
+  change the numbers inside.
+
+To remap, edit `SDLControllerButton` (or swap that value between two entries).
+To add a second physical button for the same N64 button, duplicate the entry
+with a new unique key **and** append that key to the matching
+`…ButtonMappingIds` string under `gControllers → Port1 → Buttons`.
+
+| N64 button | `Bitmask` |
+|---|---|
+| A | 32768 |
+| B | 16384 |
+| C-Up | 8 |
+| C-Down | 4 |
+| C-Left | 2 |
+| C-Right | 1 |
+| R-Trigger (grab) | 16 |
+| Z-Trigger (shield) | 8192 |
+| Start | 4096 |
+
+| Physical Vita button | `SDLControllerButton` |
+|---|---|
+| Cross | 0 |
+| Circle | 1 |
+| Square | 2 |
+| Triangle | 3 |
+| Start | 6 |
+| L | 9 |
+| R | 10 |
+
+*Example — swap grab and shield onto the opposite shoulder buttons:* in the entry
+with `"Bitmask": 16` set `"SDLControllerButton": 10`, and in the entry with
+`"Bitmask": 8192` set `"SDLControllerButton": 9`.
+
+**Two things you can't change here:** the **D-pad** and the **right-stick taunt**
+for Player 1 are read straight from the Vita's `sceCtrl` by the port and ignore
+this file (this is what lets the D-pad drive menus regardless of an old saved
+config). Everything else — face buttons, L/R, Start, both analog sticks — is
+editable.
+
+To reset to defaults, delete the `gControllers` block (or the whole file) and
+relaunch.
+
 ### Playing online (PS Vita)
 
 Netplay lives under **VS MODE → NETPLAY**. First set your name in
