@@ -29,6 +29,17 @@ struct LobbyPlayerView {
     uint32_t jitterMs = 0;
 };
 
+struct LobbyRuleSet {
+    int stage = -1;
+    int stocks = -1;
+    int timeUnits = -1;
+    int itemRate = 0;
+    int teamBattle = 0;
+    int teamAttack = 0;
+    int damageRatio = 100;
+    int handicap = 0;
+};
+
 struct LobbyView {
     bool isHost = false;
     bool connected = false;
@@ -40,6 +51,11 @@ struct LobbyView {
     int8_t ruleStage = -1;
     int8_t ruleStocks = -1;
     int8_t ruleTimeUnits = -1;
+    int8_t ruleItemRate = -1;
+    int8_t ruleTeamBattle = -1;
+    int8_t ruleTeamAttack = -1;
+    int16_t ruleDamageRatio = -1;
+    int8_t ruleHandicap = -1;
 };
 
 struct LobbySessionEvent {
@@ -62,7 +78,7 @@ public:
 
     bool SetLocalReady(bool ready);
     bool LocalReady() const;
-    void SetHostRules(int stage, int stocks, int timeUnits);
+    void SetHostRules(const LobbyRuleSet& rules);
     void ReopenLobby();
     bool CanHostStart() const;
     bool StartCharacterSelect();

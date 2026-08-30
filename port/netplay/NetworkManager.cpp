@@ -50,6 +50,12 @@ constexpr const char* kShowStatsCVar = "gNetplay.ShowStats";
 constexpr const char* kHostStageCVar = "gNetplay.HostStage";
 constexpr const char* kHostStocksCVar = "gNetplay.HostStocks";
 constexpr const char* kHostTimeCVar = "gNetplay.HostTime";
+constexpr const char* kHostItemRateCVar = "gNetplay.HostItemRate";
+constexpr const char* kHostItemTogglesCVar = "gNetplay.HostItemToggles";
+constexpr const char* kHostTeamBattleCVar = "gNetplay.HostTeamBattle";
+constexpr const char* kHostTeamAttackCVar = "gNetplay.HostTeamAttack";
+constexpr const char* kHostDamageRatioCVar = "gNetplay.HostDamageRatio";
+constexpr const char* kHostHandicapCVar = "gNetplay.HostHandicap";
 constexpr const char* kJoinAddressCVar = "gNetplay.JoinAddress";
 constexpr const char* kRendezvousServerCVar = "gNetplay.RendezvousServer";
 constexpr int kAutoInputDelay = -1;
@@ -61,6 +67,14 @@ constexpr int kHostStocksMax = 5;
 constexpr int kHostTimeInfinite = 0;
 constexpr int kHostTimeUnitMin = 2;
 constexpr int kHostTimeUnitMax = 10;
+constexpr int kHostItemRateMax = 5;
+constexpr int kHostItemTogglesMask = 0x000FFFFF;
+constexpr int kHostItemTogglesDefault = 0x000FFFFF;
+constexpr int kHostDamageMin = 50;
+constexpr int kHostDamageMax = 200;
+constexpr int kHostDamageStep = 10;
+constexpr int kHostDamageDefault = 100;
+constexpr int kHostHandicapMax = 2;
 constexpr std::size_t kMaxUiPlayerNameChars = 12;
 constexpr auto kWorkerPollInterval = std::chrono::milliseconds(10);
 constexpr auto kPlatformPollInterval = std::chrono::milliseconds(500);
@@ -240,6 +254,25 @@ void NetworkManager::LoadSettings() {
         mSettings.hostTimeUnits = kHostRuleRandom;
     }
 
+    mSettings.hostItemRate = CVarGetInteger(kHostItemRateCVar, 0);
+    if (mSettings.hostItemRate != kHostRuleRandom &&
+        (mSettings.hostItemRate < 0 || mSettings.hostItemRate > kHostItemRateMax)) {
+        mSettings.hostItemRate = 0;
+    }
+    mSettings.hostItemToggles = CVarGetInteger(kHostItemTogglesCVar, kHostItemTogglesDefault) & kHostItemTogglesMask;
+    mSettings.hostTeamBattle = CVarGetInteger(kHostTeamBattleCVar, 0) != 0 ? 1 : 0;
+    mSettings.hostTeamAttack = CVarGetInteger(kHostTeamAttackCVar, 0) != 0 ? 1 : 0;
+    mSettings.hostDamageRatio = CVarGetInteger(kHostDamageRatioCVar, kHostDamageDefault);
+    if (mSettings.hostDamageRatio != kHostRuleRandom &&
+        (mSettings.hostDamageRatio < kHostDamageMin || mSettings.hostDamageRatio > kHostDamageMax ||
+         (mSettings.hostDamageRatio % kHostDamageStep) != 0)) {
+        mSettings.hostDamageRatio = kHostDamageDefault;
+    }
+    mSettings.hostHandicap = CVarGetInteger(kHostHandicapCVar, 0);
+    if (mSettings.hostHandicap < 0 || mSettings.hostHandicap > kHostHandicapMax) {
+        mSettings.hostHandicap = 0;
+    }
+
     const char* storedJoin = CVarGetString(kJoinAddressCVar, "");
     mSettings.joinAddress = storedJoin != nullptr ? storedJoin : "";
 
@@ -261,6 +294,12 @@ void NetworkManager::SaveSettings() {
     CVarSetInteger(kHostStageCVar, settings.hostStage);
     CVarSetInteger(kHostStocksCVar, settings.hostStocks);
     CVarSetInteger(kHostTimeCVar, settings.hostTimeUnits);
+    CVarSetInteger(kHostItemRateCVar, settings.hostItemRate);
+    CVarSetInteger(kHostItemTogglesCVar, settings.hostItemToggles);
+    CVarSetInteger(kHostTeamBattleCVar, settings.hostTeamBattle);
+    CVarSetInteger(kHostTeamAttackCVar, settings.hostTeamAttack);
+    CVarSetInteger(kHostDamageRatioCVar, settings.hostDamageRatio);
+    CVarSetInteger(kHostHandicapCVar, settings.hostHandicap);
     CVarSetString(kJoinAddressCVar, settings.joinAddress.c_str());
     CVarSetString(kRendezvousServerCVar, settings.rendezvousServer.c_str());
     CVarSave();
@@ -1290,16 +1329,19 @@ void NetworkManager::ApplyReturnToLobby(bool localInitiated, bool toCss) {
 void NetworkManager::PushHostRulesToLobby() {
     if (!mLobby.IsHost()) return;
     LoadSettings();
-    int stage;
-    int stocks;
-    int timeUnits;
+    LobbyRuleSet rules;
     {
         std::lock_guard<std::mutex> lock(mMutex);
-        stage = mSettings.hostStage;
-        stocks = mSettings.hostStocks;
-        timeUnits = mSettings.hostTimeUnits;
+        rules.stage = mSettings.hostStage;
+        rules.stocks = mSettings.hostStocks;
+        rules.timeUnits = mSettings.hostTimeUnits;
+        rules.itemRate = mSettings.hostItemRate;
+        rules.teamBattle = mSettings.hostTeamBattle;
+        rules.teamAttack = mSettings.hostTeamAttack;
+        rules.damageRatio = mSettings.hostDamageRatio;
+        rules.handicap = mSettings.hostHandicap;
     }
-    mLobby.SetHostRules(stage, stocks, timeUnits);
+    mLobby.SetHostRules(rules);
 }
 
 void NetworkManager::PublishSnapshots() {
@@ -1574,6 +1616,71 @@ void NetworkManager::SetHostTimeUnits(int units) {
     {
         std::lock_guard<std::mutex> lock(mMutex);
         mSettings.hostTimeUnits = units;
+    }
+    SaveSettings();
+}
+
+void NetworkManager::SetHostItemRate(int rate) {
+    LoadSettings();
+    if (rate != kHostRuleRandom && (rate < 0 || rate > kHostItemRateMax)) {
+        rate = 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mSettings.hostItemRate = rate;
+    }
+    SaveSettings();
+}
+
+void NetworkManager::SetHostItemToggles(int mask) {
+    LoadSettings();
+    mask &= kHostItemTogglesMask;
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mSettings.hostItemToggles = mask;
+    }
+    SaveSettings();
+}
+
+void NetworkManager::SetHostTeamBattle(int enabled) {
+    LoadSettings();
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mSettings.hostTeamBattle = enabled != 0 ? 1 : 0;
+    }
+    SaveSettings();
+}
+
+void NetworkManager::SetHostTeamAttack(int enabled) {
+    LoadSettings();
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mSettings.hostTeamAttack = enabled != 0 ? 1 : 0;
+    }
+    SaveSettings();
+}
+
+void NetworkManager::SetHostDamageRatio(int ratio) {
+    LoadSettings();
+    if (ratio != kHostRuleRandom &&
+        (ratio < kHostDamageMin || ratio > kHostDamageMax || (ratio % kHostDamageStep) != 0)) {
+        ratio = kHostDamageDefault;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mSettings.hostDamageRatio = ratio;
+    }
+    SaveSettings();
+}
+
+void NetworkManager::SetHostHandicap(int mode) {
+    LoadSettings();
+    if (mode < 0 || mode > kHostHandicapMax) {
+        mode = 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mSettings.hostHandicap = mode;
     }
     SaveSettings();
 }
@@ -1996,6 +2103,54 @@ void port_netplay_hostrules_set_time(int units) {
     ssb64::netplay::NetworkManager::Instance().SetHostTimeUnits(units);
 }
 
+int port_netplay_hostrules_get_item_rate(void) {
+    return ssb64::netplay::NetworkManager::Instance().Settings().hostItemRate;
+}
+
+void port_netplay_hostrules_set_item_rate(int rate) {
+    ssb64::netplay::NetworkManager::Instance().SetHostItemRate(rate);
+}
+
+int port_netplay_hostrules_get_item_toggles(void) {
+    return ssb64::netplay::NetworkManager::Instance().Settings().hostItemToggles;
+}
+
+void port_netplay_hostrules_set_item_toggles(int mask) {
+    ssb64::netplay::NetworkManager::Instance().SetHostItemToggles(mask);
+}
+
+int port_netplay_hostrules_get_team_battle(void) {
+    return ssb64::netplay::NetworkManager::Instance().Settings().hostTeamBattle;
+}
+
+void port_netplay_hostrules_set_team_battle(int enabled) {
+    ssb64::netplay::NetworkManager::Instance().SetHostTeamBattle(enabled);
+}
+
+int port_netplay_hostrules_get_team_attack(void) {
+    return ssb64::netplay::NetworkManager::Instance().Settings().hostTeamAttack;
+}
+
+void port_netplay_hostrules_set_team_attack(int enabled) {
+    ssb64::netplay::NetworkManager::Instance().SetHostTeamAttack(enabled);
+}
+
+int port_netplay_hostrules_get_damage_ratio(void) {
+    return ssb64::netplay::NetworkManager::Instance().Settings().hostDamageRatio;
+}
+
+void port_netplay_hostrules_set_damage_ratio(int ratio) {
+    ssb64::netplay::NetworkManager::Instance().SetHostDamageRatio(ratio);
+}
+
+int port_netplay_hostrules_get_handicap(void) {
+    return ssb64::netplay::NetworkManager::Instance().Settings().hostHandicap;
+}
+
+void port_netplay_hostrules_set_handicap(int mode) {
+    ssb64::netplay::NetworkManager::Instance().SetHostHandicap(mode);
+}
+
 int port_netplay_battle_time_seconds(void) {
     return ssb64::netplay::NetworkManager::Instance().BattleTimeSeconds();
 }
@@ -2127,6 +2282,26 @@ int port_netplay_lobby_get_rule_stocks(void) {
 
 int port_netplay_lobby_get_rule_time(void) {
     return ssb64::netplay::NetworkManager::Instance().Lobby().ruleTimeUnits;
+}
+
+int port_netplay_lobby_get_rule_item_rate(void) {
+    return ssb64::netplay::NetworkManager::Instance().Lobby().ruleItemRate;
+}
+
+int port_netplay_lobby_get_rule_team_battle(void) {
+    return ssb64::netplay::NetworkManager::Instance().Lobby().ruleTeamBattle;
+}
+
+int port_netplay_lobby_get_rule_team_attack(void) {
+    return ssb64::netplay::NetworkManager::Instance().Lobby().ruleTeamAttack;
+}
+
+int port_netplay_lobby_get_rule_damage_ratio(void) {
+    return ssb64::netplay::NetworkManager::Instance().Lobby().ruleDamageRatio;
+}
+
+int port_netplay_lobby_get_rule_handicap(void) {
+    return ssb64::netplay::NetworkManager::Instance().Lobby().ruleHandicap;
 }
 
 int port_netplay_lobby_get_local_player(void) {

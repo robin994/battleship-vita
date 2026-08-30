@@ -364,6 +364,53 @@ void TestLobbyFourPlayersAndStart() {
     }), "host close propagation");
 }
 
+void TestLobbyRulesSync() {
+    LobbySession host;
+    LobbySession client;
+    std::vector<LobbySession*> clients{&client};
+
+    Require(host.StartHost(NetplayMode::Online, 0x1A2B3C4DU, "HOST", "1.2", "127.0.0.1"), "rules host start");
+    Require(client.StartClient(NetplayMode::Online, "127.0.0.1", 0x1A2B3C4DU, "CLI", "1.2"), "rules client start");
+    Require(WaitFor([&] { return host.ConnectedPlayerCount() == 2 && client.Snapshot().connected; },
+                    [&] { PollAll(host, clients); }), "rules lobby join");
+
+    LobbyRuleSet rules;
+    rules.stage = 4;
+    rules.stocks = 3;
+    rules.timeUnits = -1;
+    rules.itemRate = 5;
+    rules.teamBattle = 1;
+    rules.teamAttack = 1;
+    rules.damageRatio = 150;
+    rules.handicap = 2;
+    host.SetHostRules(rules);
+
+    Require(WaitFor([&] {
+        const LobbyView v = client.Snapshot();
+        return v.ruleStage == 4 && v.ruleStocks == 3 && v.ruleTimeUnits == -1 && v.ruleItemRate == 5 &&
+               v.ruleTeamBattle == 1 && v.ruleTeamAttack == 1 && v.ruleDamageRatio == 150 && v.ruleHandicap == 2;
+    }, [&] { PollAll(host, clients); }), "full ruleset reaches client");
+
+    LobbyRuleSet cleared;
+    cleared.stage = -1;
+    cleared.stocks = -1;
+    cleared.timeUnits = 0;
+    cleared.itemRate = 0;
+    cleared.teamBattle = 0;
+    cleared.teamAttack = 0;
+    cleared.damageRatio = 100;
+    cleared.handicap = 0;
+    host.SetHostRules(cleared);
+    Require(WaitFor([&] {
+        const LobbyView v = client.Snapshot();
+        return v.ruleStage == -1 && v.ruleTimeUnits == 0 && v.ruleItemRate == 0 && v.ruleTeamBattle == 0 &&
+               v.ruleDamageRatio == 100 && v.ruleHandicap == 0;
+    }, [&] { PollAll(host, clients); }), "ruleset update reaches client");
+
+    client.Stop(RejectReason::None, false);
+    host.Stop(RejectReason::HostClosing, false);
+}
+
 void TestBuildMismatch() {
     LobbySession host;
     LobbySession client;
@@ -1045,6 +1092,7 @@ int main() {
     TestConfirmedInputBarrier();
     TestDiscovery();
     TestLobbyFourPlayersAndStart();
+    TestLobbyRulesSync();
     TestBuildMismatch();
     TestLobbyFullReject();
     TestHeartbeatTimeout();

@@ -9,7 +9,7 @@
 namespace ssb64::netplay {
 
 constexpr uint32_t kProtocolMagic = 0x42534E50U; // "BSNP"
-constexpr uint16_t kProtocolVersion = 1;
+constexpr uint16_t kProtocolVersion = 2;
 // Keep the Vita LAN sockets in the same conventional range used by Quake
 // ports rather than at the very top of the 16-bit port space.
 constexpr uint16_t kDiscoveryPort = 26040;

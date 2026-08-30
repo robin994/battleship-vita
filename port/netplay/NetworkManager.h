@@ -26,6 +26,12 @@ struct NetplaySettings {
     int hostStage = -1;
     int hostStocks = -1;
     int hostTimeUnits = -1;
+    int hostItemRate = 0;
+    int hostItemToggles = 0x000FFFFF;
+    int hostTeamBattle = 0;
+    int hostTeamAttack = 0;
+    int hostDamageRatio = 100;
+    int hostHandicap = 0;
     std::string joinAddress = "";
     std::string rendezvousServer = "";
 };
@@ -59,6 +65,12 @@ public:
     void SetHostStage(int stage);
     void SetHostStocks(int stocks);
     void SetHostTimeUnits(int units);
+    void SetHostItemRate(int rate);
+    void SetHostItemToggles(int mask);
+    void SetHostTeamBattle(int enabled);
+    void SetHostTeamAttack(int enabled);
+    void SetHostDamageRatio(int ratio);
+    void SetHostHandicap(int mode);
     int BattleTimeSeconds() const;
     bool BattleIsTimed() const;
     void ResetSettings();

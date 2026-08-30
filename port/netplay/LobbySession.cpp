@@ -619,11 +619,25 @@ bool LobbySession::HandleClientPacket(Peer& peer, const DecodedPacket& packet) {
         uint8_t stage = 0xFF;
         uint8_t stocks = 0xFF;
         uint8_t timeUnits = 0xFF;
+        uint8_t itemRate = 0xFF;
+        uint8_t teamBattle = 0xFF;
+        uint8_t teamAttack = 0xFF;
+        uint8_t damageRatio = 0xFF;
+        uint8_t handicap = 0xFF;
         PayloadReader reader(packet.payload.data(), packet.payload.size());
-        if (!reader.U8(stage) || !reader.U8(stocks) || !reader.U8(timeUnits) || !reader.Empty()) return false;
+        if (!reader.U8(stage) || !reader.U8(stocks) || !reader.U8(timeUnits) || !reader.U8(itemRate) ||
+            !reader.U8(teamBattle) || !reader.U8(teamAttack) || !reader.U8(damageRatio) ||
+            !reader.U8(handicap) || !reader.Empty()) {
+            return false;
+        }
         mView.ruleStage = static_cast<int8_t>(stage);
         mView.ruleStocks = static_cast<int8_t>(stocks);
         mView.ruleTimeUnits = static_cast<int8_t>(timeUnits);
+        mView.ruleItemRate = static_cast<int8_t>(itemRate);
+        mView.ruleTeamBattle = static_cast<int8_t>(teamBattle);
+        mView.ruleTeamAttack = static_cast<int8_t>(teamAttack);
+        mView.ruleDamageRatio = (damageRatio == 0xFF) ? static_cast<int16_t>(-1) : static_cast<int16_t>(damageRatio);
+        mView.ruleHandicap = static_cast<int8_t>(handicap);
         return true;
     }
 
@@ -831,6 +845,11 @@ std::vector<uint8_t> LobbySession::MakeLobbyRulesPayload() const {
     writer.U8(static_cast<uint8_t>(mView.ruleStage));
     writer.U8(static_cast<uint8_t>(mView.ruleStocks));
     writer.U8(static_cast<uint8_t>(mView.ruleTimeUnits));
+    writer.U8(static_cast<uint8_t>(mView.ruleItemRate));
+    writer.U8(static_cast<uint8_t>(mView.ruleTeamBattle));
+    writer.U8(static_cast<uint8_t>(mView.ruleTeamAttack));
+    writer.U8(mView.ruleDamageRatio < 0 ? 0xFF : static_cast<uint8_t>(mView.ruleDamageRatio));
+    writer.U8(static_cast<uint8_t>(mView.ruleHandicap));
     return payload;
 }
 
@@ -853,15 +872,29 @@ void LobbySession::ReopenLobby() {
     }
 }
 
-void LobbySession::SetHostRules(int stage, int stocks, int timeUnits) {
+void LobbySession::SetHostRules(const LobbyRuleSet& rules) {
     if (mMode != Mode::Host) return;
-    const int8_t s = static_cast<int8_t>(stage);
-    const int8_t k = static_cast<int8_t>(stocks);
-    const int8_t t = static_cast<int8_t>(timeUnits);
-    if (mView.ruleStage == s && mView.ruleStocks == k && mView.ruleTimeUnits == t) return;
+    const int8_t s = static_cast<int8_t>(rules.stage);
+    const int8_t k = static_cast<int8_t>(rules.stocks);
+    const int8_t t = static_cast<int8_t>(rules.timeUnits);
+    const int8_t ir = static_cast<int8_t>(rules.itemRate);
+    const int8_t tb = static_cast<int8_t>(rules.teamBattle);
+    const int8_t ta = static_cast<int8_t>(rules.teamAttack);
+    const int16_t dr = static_cast<int16_t>(rules.damageRatio);
+    const int8_t hc = static_cast<int8_t>(rules.handicap);
+    if (mView.ruleStage == s && mView.ruleStocks == k && mView.ruleTimeUnits == t &&
+        mView.ruleItemRate == ir && mView.ruleTeamBattle == tb && mView.ruleTeamAttack == ta &&
+        mView.ruleDamageRatio == dr && mView.ruleHandicap == hc) {
+        return;
+    }
     mView.ruleStage = s;
     mView.ruleStocks = k;
     mView.ruleTimeUnits = t;
+    mView.ruleItemRate = ir;
+    mView.ruleTeamBattle = tb;
+    mView.ruleTeamAttack = ta;
+    mView.ruleDamageRatio = dr;
+    mView.ruleHandicap = hc;
     Broadcast(PacketType::LobbyRules, 0, MakeLobbyRulesPayload());
 }
 
