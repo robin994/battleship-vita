@@ -4,6 +4,7 @@
 #include "LanDiscovery.h"
 #include "LobbySession.h"
 #include "NetplayProtocol.h"
+#include "RendezvousClient.h"
 #include "netplay_bridge.h"
 
 #include <array>
@@ -26,6 +27,7 @@ struct NetplaySettings {
     int hostStocks = -1;
     int hostTimeUnits = -1;
     std::string joinAddress = "";
+    std::string rendezvousServer = "";
 };
 
 class NetworkManager {
@@ -52,6 +54,8 @@ public:
     void SetPlayerName(const std::string& name);
     void SetInputDelay(int frames);
     void SetShowStats(bool enabled);
+    void SetRendezvousServer(const std::string& host);
+    std::string RendezvousServer() const;
     void SetHostStage(int stage);
     void SetHostStocks(int stocks);
     void SetHostTimeUnits(int units);
@@ -234,6 +238,7 @@ private:
     LanDiscovery mDiscovery;
     LobbySession mLobby;
     GameplaySession mGameplay;
+    RendezvousClient mRendezvous;
 };
 
 } // namespace ssb64::netplay

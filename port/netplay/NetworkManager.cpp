@@ -51,6 +51,7 @@ constexpr const char* kHostStageCVar = "gNetplay.HostStage";
 constexpr const char* kHostStocksCVar = "gNetplay.HostStocks";
 constexpr const char* kHostTimeCVar = "gNetplay.HostTime";
 constexpr const char* kJoinAddressCVar = "gNetplay.JoinAddress";
+constexpr const char* kRendezvousServerCVar = "gNetplay.RendezvousServer";
 constexpr int kAutoInputDelay = -1;
 constexpr int kMaxInputDelay = 4;
 constexpr int kHostRuleRandom = -1;
@@ -242,6 +243,9 @@ void NetworkManager::LoadSettings() {
     const char* storedJoin = CVarGetString(kJoinAddressCVar, "");
     mSettings.joinAddress = storedJoin != nullptr ? storedJoin : "";
 
+    const char* storedRendezvous = CVarGetString(kRendezvousServerCVar, "");
+    mSettings.rendezvousServer = storedRendezvous != nullptr ? storedRendezvous : "";
+
     mSettingsLoaded = true;
 }
 
@@ -258,6 +262,7 @@ void NetworkManager::SaveSettings() {
     CVarSetInteger(kHostStocksCVar, settings.hostStocks);
     CVarSetInteger(kHostTimeCVar, settings.hostTimeUnits);
     CVarSetString(kJoinAddressCVar, settings.joinAddress.c_str());
+    CVarSetString(kRendezvousServerCVar, settings.rendezvousServer.c_str());
     CVarSave();
 }
 
@@ -379,6 +384,7 @@ void NetworkManager::WorkerMain() {
                 mGameplay.Stop();
                 mLobby.Stop(RejectReason::None, false);
                 mDiscovery.Stop();
+                mRendezvous.Stop();
                 ForceTransition(NetplayState::Disconnected, "wifi disconnected");
             }
             nextPlatformPoll = now + kPlatformPollInterval;
@@ -389,6 +395,7 @@ void NetworkManager::WorkerMain() {
     mGameplay.Stop();
     mLobby.Stop(RejectReason::HostClosing, true);
     mDiscovery.Stop();
+    mRendezvous.Stop();
     PublishSnapshots();
     platform::Shutdown();
     mNetworkInitialized.store(false, std::memory_order_release);
@@ -463,6 +470,7 @@ void NetworkManager::ProcessCommands() {
                 mGameplay.Stop();
                 mLobby.Stop(RejectReason::None, true);
                 mDiscovery.Stop();
+                mRendezvous.Stop();
                 ResetRoundState(true, true);
                 {
                     std::lock_guard<std::mutex> lock(mMutex);
@@ -500,17 +508,28 @@ void NetworkManager::ProcessCommands() {
                 break;
             }
 
-            case CommandType::StartDiscovery:
+            case CommandType::StartDiscovery: {
                 mGameplay.Stop();
                 mLobby.Stop(RejectReason::None, true);
                 mDiscovery.Stop();
+                mRendezvous.Stop();
                 ResetRoundState(true, true);
                 if (!mDiscovery.StartClient(Mode(), kNetplayBuildId)) {
                     SetError(transport::LastError(), "discovery init");
                     break;
                 }
+                std::string rendezvous;
+                {
+                    std::lock_guard<std::mutex> lock(mMutex);
+                    rendezvous = mSettings.rendezvousServer;
+                }
+                if (Mode() == NetplayMode::Online && !rendezvous.empty()) {
+                    mRendezvous.SetServer(rendezvous);
+                    mRendezvous.StartList(kNetplayBuildId);
+                }
                 ForceTransition(NetplayState::Discovering, "LAN discovery started");
                 break;
+            }
 
             case CommandType::RefreshDiscovery:
                 if (!mDiscovery.IsClientActive()) {
@@ -521,12 +540,14 @@ void NetworkManager::ProcessCommands() {
                     ForceTransition(NetplayState::Discovering, "LAN discovery refreshed");
                 }
                 mDiscovery.RequestImmediateScan();
+                mRendezvous.RequestList();
                 break;
 
             case CommandType::HostLobby: {
                 mGameplay.Stop();
                 mLobby.Stop(RejectReason::None, true);
                 mDiscovery.Stop();
+                mRendezvous.Stop();
                 ResetRoundState(true, true);
                 NetplaySettings settings;
                 std::string localEndpoint;
@@ -559,6 +580,12 @@ void NetworkManager::ProcessCommands() {
                     SetError(transport::LastError(), "discovery host");
                     break;
                 }
+                if (Mode() == NetplayMode::Online && !settings.rendezvousServer.empty()) {
+                    mRendezvous.SetServer(settings.rendezvousServer);
+                    mRendezvous.StartHost(settings.playerName, kNetplayBuildId,
+                                          static_cast<uint8_t>(kMaxPlayers), kLobbyPort, kGameplayPort,
+                                          sessionId);
+                }
                 ForceTransition(NetplayState::HostingLobby, "local lobby created");
                 break;
             }
@@ -566,6 +593,7 @@ void NetworkManager::ProcessCommands() {
             case CommandType::JoinLobby: {
                 mGameplay.Stop();
                 mDiscovery.Stop();
+                mRendezvous.Stop();
                 mLobby.Stop(RejectReason::None, true);
                 ResetRoundState(true, true);
                 NetplaySettings settings;
@@ -596,6 +624,7 @@ void NetworkManager::ProcessCommands() {
                 mGameplay.Stop();
                 mLobby.Stop(RejectReason::None, true);
                 mDiscovery.Stop();
+                mRendezvous.Stop();
                 ResetRoundState(true, true);
                 {
                     std::lock_guard<std::mutex> lock(mMutex);
@@ -743,6 +772,7 @@ void NetworkManager::ProcessCommands() {
                 mLobby.Poll();
                 mLobby.Stop(RejectReason::None, false);
                 mDiscovery.Stop();
+                mRendezvous.Stop();
                 ResetRoundState(true, true);
                 {
                     std::lock_guard<std::mutex> lock(mMutex);
@@ -888,6 +918,7 @@ void NetworkManager::PollNetworkServices() {
     mGameplay.Poll();
     mDiscovery.Poll();
     mLobby.Poll();
+    mRendezvous.Poll();
 
     LobbySessionEvent event;
     while (mLobby.PopSessionEvent(event)) {
@@ -1127,6 +1158,12 @@ void NetworkManager::PollNetworkServices() {
         info.playerCount = mLobby.ConnectedPlayerCount();
         info.status = lobby.status;
         mDiscovery.SetHostInfo(info);
+
+        if (mRendezvous.Hosting()) {
+            const NetplayState st = State();
+            const uint8_t rvStatus = (st == NetplayState::HostingLobby) ? 0 : 1;
+            mRendezvous.UpdateStatus(mLobby.ConnectedPlayerCount(), rvStatus);
+        }
     }
 
     const NetplayState state = State();
@@ -1267,6 +1304,16 @@ void NetworkManager::PushHostRulesToLobby() {
 
 void NetworkManager::PublishSnapshots() {
     std::vector<DiscoveredLobby> discovered = mDiscovery.Snapshot();
+    for (DiscoveredLobby& board : mRendezvous.Lobbies()) {
+        bool dup = false;
+        for (const DiscoveredLobby& lan : discovered) {
+            if (lan.hostIp == board.hostIp && lan.sessionId == board.sessionId) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) discovered.push_back(std::move(board));
+    }
     LobbyView lobby = mLobby.Snapshot();
     std::lock_guard<std::mutex> lock(mMutex);
     mDiscoveredLobbies = std::move(discovered);
@@ -1433,6 +1480,35 @@ std::string NetworkManager::LastError() const {
 NetplaySettings NetworkManager::Settings() const {
     std::lock_guard<std::mutex> lock(mMutex);
     return mSettings;
+}
+
+namespace {
+std::string SanitizeRendezvousHost(const std::string& in) {
+    std::string out;
+    for (char c : in) {
+        if (out.size() >= 128) break;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '.' || c == '-' || c == ':') {
+            out.push_back(c);
+        }
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+} // namespace
+
+void NetworkManager::SetRendezvousServer(const std::string& host) {
+    LoadSettings();
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mSettings.rendezvousServer = SanitizeRendezvousHost(host);
+    }
+    SaveSettings();
+}
+
+std::string NetworkManager::RendezvousServer() const {
+    std::lock_guard<std::mutex> lock(mMutex);
+    return mSettings.rendezvousServer;
 }
 
 void NetworkManager::SetPlayerName(const std::string& name) {
@@ -1870,6 +1946,14 @@ int port_netplay_join_address(const char* ip) {
 
 void port_netplay_get_join_address(char* out, int out_size) {
     ssb64::netplay::CopyStringOut(ssb64::netplay::NetworkManager::Instance().JoinAddress(), out, out_size);
+}
+
+void port_netplay_set_rendezvous_server(const char* host) {
+    ssb64::netplay::NetworkManager::Instance().SetRendezvousServer(host != nullptr ? host : "");
+}
+
+void port_netplay_get_rendezvous_server(char* out, int out_size) {
+    ssb64::netplay::CopyStringOut(ssb64::netplay::NetworkManager::Instance().RendezvousServer(), out, out_size);
 }
 
 int port_netplay_get_input_delay(void) {
