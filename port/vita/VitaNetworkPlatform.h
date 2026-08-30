@@ -1,8 +1,17 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace ssb64::netplay::platform {
+
+enum class ImeState : int {
+    Inactive = 0,
+    Running,
+    Accepted,
+    Canceled,
+    Error,
+};
 
 enum class AdhocConnectionState : int {
     Inactive = 0,
@@ -35,5 +44,14 @@ bool IsAdhocConnectionReady();
 bool IsCommonDialogActive();
 void ShutdownAdhoc();
 void Shutdown();
+
+// System-keyboard (IME) text entry. Begin/Cancel are called from the menu task;
+// Update must be pumped every frame while Running. State/Result are lock-free
+// reads for the menu.
+bool BeginImeDialog(const char* title, const char* initialText, uint32_t maxLength, bool numeric);
+void UpdateImeDialog();
+ImeState GetImeState();
+bool GetImeResult(std::string& out);
+void CancelImeDialog();
 
 } // namespace ssb64::netplay::platform

@@ -5,13 +5,16 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <thread>
 
 #ifdef __vita__
 #include <psp2/apputil.h>
 #include <psp2/common_dialog.h>
+#include <psp2/ime_dialog.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
 #include <psp2/netcheck_dialog.h>
@@ -43,6 +46,37 @@ bool sInitialized = false;
 bool sAdhocInitialized = false;
 std::atomic<AdhocConnectionState> sAdhocConnectionState{AdhocConnectionState::Inactive};
 std::atomic<int> sAdhocDialogError{0};
+
+std::atomic<ImeState> sImeState{ImeState::Inactive};
+std::mutex sImeResultMutex;
+std::string sImeResult;
+#ifdef __vita__
+bool sImeModuleOwned = false;
+constexpr std::size_t kImeInitialCap = 512;
+SceWChar16 sImeTitle[SCE_IME_DIALOG_MAX_TITLE_LENGTH + 1]{};
+SceWChar16 sImeInitial[kImeInitialCap]{};
+SceWChar16 sImeBuffer[SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1]{};
+
+void ImeUtf8ToWide(const char* src, SceWChar16* dst, std::size_t dstCap) {
+    std::size_t n = 0;
+    if (src != nullptr && dstCap > 0) {
+        for (; src[n] != '\0' && (n + 1) < dstCap; ++n) {
+            const unsigned char c = static_cast<unsigned char>(src[n]);
+            dst[n] = (c < 0x80) ? static_cast<SceWChar16>(c) : static_cast<SceWChar16>('?');
+        }
+    }
+    dst[n] = 0;
+}
+
+std::string ImeWideToUtf8(const SceWChar16* src) {
+    std::string out;
+    for (std::size_t i = 0; src[i] != 0 && i < SCE_IME_DIALOG_MAX_TEXT_LENGTH; ++i) {
+        const SceWChar16 w = src[i];
+        out.push_back((w < 0x80) ? static_cast<char>(w) : '?');
+    }
+    return out;
+}
+#endif
 
 #ifdef __vita__
 std::string FormatMac(const SceNetEtherAddr& mac) {
@@ -420,7 +454,114 @@ bool IsAdhocConnectionReady() {
 }
 
 bool IsCommonDialogActive() {
-    return GetAdhocConnectionState() == AdhocConnectionState::Running;
+    return GetAdhocConnectionState() == AdhocConnectionState::Running ||
+           sImeState.load(std::memory_order_acquire) == ImeState::Running;
+}
+
+bool BeginImeDialog(const char* title, const char* initialText, uint32_t maxLength, bool numeric) {
+#ifdef __vita__
+    if (sImeState.load(std::memory_order_acquire) == ImeState::Running) return false;
+
+    if (EnsureCommonDialogRuntime() < 0) {
+        sImeState.store(ImeState::Error, std::memory_order_release);
+        return false;
+    }
+    if (!sImeModuleOwned && sceSysmoduleIsLoaded(SCE_SYSMODULE_IME) < 0) {
+        const int moduleResult = sceSysmoduleLoadModule(SCE_SYSMODULE_IME);
+        if (moduleResult < 0) {
+            port_log("[NETPLAY] IME sysmodule load failed code=0x%08X\n",
+                     static_cast<unsigned int>(moduleResult));
+            sImeState.store(ImeState::Error, std::memory_order_release);
+            return false;
+        }
+        sImeModuleOwned = true;
+    }
+
+    if (maxLength == 0 || maxLength > SCE_IME_DIALOG_MAX_TEXT_LENGTH) maxLength = 64;
+    ImeUtf8ToWide(title, sImeTitle, SCE_IME_DIALOG_MAX_TITLE_LENGTH + 1);
+    ImeUtf8ToWide(initialText, sImeInitial, kImeInitialCap);
+    std::memset(sImeBuffer, 0, sizeof(sImeBuffer));
+
+    SceImeDialogParam param;
+    sceImeDialogParamInit(&param);
+    param.supportedLanguages = 0;
+    param.languagesForced = 0;
+    param.type = numeric ? SCE_IME_TYPE_EXTENDED_NUMBER : SCE_IME_TYPE_BASIC_LATIN;
+    param.option = 0;
+    param.dialogMode = SCE_IME_DIALOG_DIALOG_MODE_WITH_CANCEL;
+    param.textBoxMode = SCE_IME_DIALOG_TEXTBOX_MODE_WITH_CLEAR;
+    param.title = sImeTitle;
+    param.maxTextLength = maxLength;
+    param.initialText = sImeInitial;
+    param.inputTextBuffer = sImeBuffer;
+
+    const int initResult = sceImeDialogInit(&param);
+    if (initResult < 0) {
+        port_log("[NETPLAY] sceImeDialogInit failed code=0x%08X\n",
+                 static_cast<unsigned int>(initResult));
+        sImeState.store(ImeState::Error, std::memory_order_release);
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(sImeResultMutex);
+        sImeResult.clear();
+    }
+    sImeState.store(ImeState::Running, std::memory_order_release);
+    port_log("[NETPLAY] IME dialog opened numeric=%d max=%u\n", numeric ? 1 : 0,
+             static_cast<unsigned int>(maxLength));
+    return true;
+#else
+    (void)title;
+    (void)initialText;
+    (void)maxLength;
+    (void)numeric;
+    sImeState.store(ImeState::Error, std::memory_order_release);
+    return false;
+#endif
+}
+
+void UpdateImeDialog() {
+#ifdef __vita__
+    if (sImeState.load(std::memory_order_acquire) != ImeState::Running) return;
+
+    const SceCommonDialogStatus status = sceImeDialogGetStatus();
+    if (status != SCE_COMMON_DIALOG_STATUS_FINISHED) return;
+
+    SceImeDialogResult result{};
+    sceImeDialogGetResult(&result);
+    sceImeDialogTerm();
+
+    if (result.result == 0 && result.button == SCE_IME_DIALOG_BUTTON_ENTER) {
+        std::string text = ImeWideToUtf8(sImeBuffer);
+        {
+            std::lock_guard<std::mutex> lock(sImeResultMutex);
+            sImeResult = std::move(text);
+        }
+        sImeState.store(ImeState::Accepted, std::memory_order_release);
+    } else {
+        sImeState.store(ImeState::Canceled, std::memory_order_release);
+    }
+#endif
+}
+
+ImeState GetImeState() {
+    return sImeState.load(std::memory_order_acquire);
+}
+
+bool GetImeResult(std::string& out) {
+    std::lock_guard<std::mutex> lock(sImeResultMutex);
+    out = sImeResult;
+    return !out.empty();
+}
+
+void CancelImeDialog() {
+#ifdef __vita__
+    if (sImeState.load(std::memory_order_acquire) == ImeState::Running) {
+        sceImeDialogAbort();
+        sceImeDialogTerm();
+    }
+#endif
+    sImeState.store(ImeState::Inactive, std::memory_order_release);
 }
 
 void ShutdownAdhoc() {

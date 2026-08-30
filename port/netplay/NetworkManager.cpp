@@ -2214,6 +2214,37 @@ int port_netplay_common_dialog_active(void) {
     return ssb64::netplay::platform::IsCommonDialogActive() ? 1 : 0;
 }
 
+int port_netplay_ime_begin(const char* title, const char* initial, int max_len, int mode) {
+    return ssb64::netplay::platform::BeginImeDialog(title != nullptr ? title : "",
+                                                    initial != nullptr ? initial : "",
+                                                    max_len > 0 ? static_cast<uint32_t>(max_len) : 0U,
+                                                    mode == 1) ? 1 : 0;
+}
+
+void port_netplay_ime_tick(void) {
+    ssb64::netplay::platform::UpdateImeDialog();
+}
+
+int port_netplay_ime_state(void) {
+    return static_cast<int>(ssb64::netplay::platform::GetImeState());
+}
+
+int port_netplay_ime_result(char* out, int out_size) {
+    std::string value;
+    ssb64::netplay::platform::GetImeResult(value);
+    if (out == nullptr || out_size <= 0) return static_cast<int>(value.size());
+    const std::size_t copy = value.size() < static_cast<std::size_t>(out_size - 1)
+                                 ? value.size()
+                                 : static_cast<std::size_t>(out_size - 1);
+    std::memcpy(out, value.data(), copy);
+    out[copy] = '\0';
+    return static_cast<int>(copy);
+}
+
+void port_netplay_ime_cancel(void) {
+    ssb64::netplay::platform::CancelImeDialog();
+}
+
 void port_netplay_start_discovery(void) {
     ssb64::netplay::NetworkManager::Instance().StartDiscovery();
 }
