@@ -1,0 +1,203 @@
+{
+    "_comment": [
+        "PS Vita controller binding template for BattleShip (SSB64 port).",
+        "",
+        "This is the DEFAULT Player 1 layout that the game writes to",
+        "ux0:data/battleship/BattleShip.cfg.json on first launch, extracted here",
+        "so you can edit it offline and push it back. See the README section",
+        "'Controls (PS Vita)' for the full how-to and the value tables.",
+        "",
+        "HOW TO USE:",
+        "  1. Edit the numbers below (not the entry names / *MappingIds keys).",
+        "     - ButtonMappings.<id>.Bitmask            = which N64 button",
+        "     - ButtonMappings.<id>.SDLControllerButton = which Vita button (0..14)",
+        "  2. Either drop this whole file in as BattleShip.cfg.json (you lose any",
+        "     other tuned settings - on Vita most are re-applied at boot anyway),",
+        "     OR merge just the CVars.gControllers object into your existing file.",
+        "  3. Push over FTP (vitacompanion) to",
+        "     ux0:data/battleship/BattleShip.cfg.json and relaunch.",
+        "",
+        "N64 Bitmask:  A 32768 | B 16384 | CUp 8 | CDown 4 | CLeft 2 | CRight 1",
+        "              R(grab) 16 | Z(shield) 8192 | Start 4096",
+        "Vita button:  Cross 0 | Circle 1 | Square 2 | Triangle 3 | Start 6",
+        "              L 9 | R 10  (D-pad 11-14)",
+        "",
+        "NOTE: the D-pad and the right-stick 'flick = taunt' for Player 1 are read",
+        "straight from sceCtrl by the port and IGNORE this file. Everything else",
+        "here (face buttons, L/R, Start, both analog sticks) is honoured.",
+        "The _comment key itself is ignored by the game."
+    ],
+    "CVars": {
+        "gControllers": {
+            "ButtonMappings": {
+                "P0-B32768-SDLB1": {
+                    "ButtonMappingClass": "SDLButtonToButtonMapping",
+                    "Bitmask": 32768,
+                    "SDLControllerButton": 1
+                },
+                "P0-B16384-SDLB0": {
+                    "ButtonMappingClass": "SDLButtonToButtonMapping",
+                    "Bitmask": 16384,
+                    "SDLControllerButton": 0
+                },
+                "P0-B8-SDLB3": {
+                    "ButtonMappingClass": "SDLButtonToButtonMapping",
+                    "Bitmask": 8,
+                    "SDLControllerButton": 3
+                },
+                "P0-B2-SDLB2": {
+                    "ButtonMappingClass": "SDLButtonToButtonMapping",
+                    "Bitmask": 2,
+                    "SDLControllerButton": 2
+                },
+                "P0-B16-SDLB9": {
+                    "ButtonMappingClass": "SDLButtonToButtonMapping",
+                    "Bitmask": 16,
+                    "SDLControllerButton": 9
+                },
+                "P0-B8192-SDLB10": {
+                    "ButtonMappingClass": "SDLButtonToButtonMapping",
+                    "Bitmask": 8192,
+                    "SDLControllerButton": 10
+                },
+                "P0-B4096-SDLB6": {
+                    "ButtonMappingClass": "SDLButtonToButtonMapping",
+                    "Bitmask": 4096,
+                    "SDLControllerButton": 6
+                },
+                "P0-B2048-SDLB11": {
+                    "ButtonMappingClass": "SDLButtonToButtonMapping",
+                    "Bitmask": 2048,
+                    "SDLControllerButton": 11
+                },
+                "P0-B1024-SDLB12": {
+                    "ButtonMappingClass": "SDLButtonToButtonMapping",
+                    "Bitmask": 1024,
+                    "SDLControllerButton": 12
+                },
+                "P0-B512-SDLB13": {
+                    "ButtonMappingClass": "SDLButtonToButtonMapping",
+                    "Bitmask": 512,
+                    "SDLControllerButton": 13
+                },
+                "P0-B256-SDLB14": {
+                    "ButtonMappingClass": "SDLButtonToButtonMapping",
+                    "Bitmask": 256,
+                    "SDLControllerButton": 14
+                },
+                "P0-B8-SDLA3-ADN": {
+                    "ButtonMappingClass": "SDLAxisDirectionToButtonMapping",
+                    "Bitmask": 8,
+                    "SDLControllerAxis": 3,
+                    "AxisDirection": -1
+                },
+                "P0-B4-SDLA3-ADP": {
+                    "ButtonMappingClass": "SDLAxisDirectionToButtonMapping",
+                    "Bitmask": 4,
+                    "SDLControllerAxis": 3,
+                    "AxisDirection": 1
+                },
+                "P0-B2-SDLA2-ADN": {
+                    "ButtonMappingClass": "SDLAxisDirectionToButtonMapping",
+                    "Bitmask": 2,
+                    "SDLControllerAxis": 2,
+                    "AxisDirection": -1
+                },
+                "P0-B1-SDLA2-ADP": {
+                    "ButtonMappingClass": "SDLAxisDirectionToButtonMapping",
+                    "Bitmask": 1,
+                    "SDLControllerAxis": 2,
+                    "AxisDirection": 1
+                }
+            },
+            "AxisDirectionMappings": {
+                "P0-S0-D0-SDLA0-ADN": {
+                    "AxisDirectionMappingClass": "SDLAxisDirectionToAxisDirectionMapping",
+                    "Stick": 0,
+                    "Direction": 0,
+                    "SDLControllerAxis": 0,
+                    "AxisDirection": -1
+                },
+                "P0-S0-D1-SDLA0-ADP": {
+                    "AxisDirectionMappingClass": "SDLAxisDirectionToAxisDirectionMapping",
+                    "Stick": 0,
+                    "Direction": 1,
+                    "SDLControllerAxis": 0,
+                    "AxisDirection": 1
+                },
+                "P0-S0-D2-SDLA1-ADN": {
+                    "AxisDirectionMappingClass": "SDLAxisDirectionToAxisDirectionMapping",
+                    "Stick": 0,
+                    "Direction": 2,
+                    "SDLControllerAxis": 1,
+                    "AxisDirection": -1
+                },
+                "P0-S0-D3-SDLA1-ADP": {
+                    "AxisDirectionMappingClass": "SDLAxisDirectionToAxisDirectionMapping",
+                    "Stick": 0,
+                    "Direction": 3,
+                    "SDLControllerAxis": 1,
+                    "AxisDirection": 1
+                },
+                "P0-S1-D0-SDLA2-ADN": {
+                    "AxisDirectionMappingClass": "SDLAxisDirectionToAxisDirectionMapping",
+                    "Stick": 1,
+                    "Direction": 0,
+                    "SDLControllerAxis": 2,
+                    "AxisDirection": -1
+                },
+                "P0-S1-D1-SDLA2-ADP": {
+                    "AxisDirectionMappingClass": "SDLAxisDirectionToAxisDirectionMapping",
+                    "Stick": 1,
+                    "Direction": 1,
+                    "SDLControllerAxis": 2,
+                    "AxisDirection": 1
+                },
+                "P0-S1-D2-SDLA3-ADN": {
+                    "AxisDirectionMappingClass": "SDLAxisDirectionToAxisDirectionMapping",
+                    "Stick": 1,
+                    "Direction": 2,
+                    "SDLControllerAxis": 3,
+                    "AxisDirection": -1
+                },
+                "P0-S1-D3-SDLA3-ADP": {
+                    "AxisDirectionMappingClass": "SDLAxisDirectionToAxisDirectionMapping",
+                    "Stick": 1,
+                    "Direction": 3,
+                    "SDLControllerAxis": 3,
+                    "AxisDirection": 1
+                }
+            },
+            "Port1": {
+                "HasConfig": 1,
+                "Buttons": {
+                    "AButtonMappingIds": "P0-B32768-SDLB1,",
+                    "BButtonMappingIds": "P0-B16384-SDLB0,",
+                    "CUpButtonMappingIds": "P0-B8-SDLB3,P0-B8-SDLA3-ADN,",
+                    "CDownButtonMappingIds": "P0-B4-SDLA3-ADP,",
+                    "CLeftButtonMappingIds": "P0-B2-SDLB2,P0-B2-SDLA2-ADN,",
+                    "CRightButtonMappingIds": "P0-B1-SDLA2-ADP,",
+                    "RButtonMappingIds": "P0-B16-SDLB9,",
+                    "ZButtonMappingIds": "P0-B8192-SDLB10,",
+                    "StartButtonMappingIds": "P0-B4096-SDLB6,",
+                    "DUpButtonMappingIds": "P0-B2048-SDLB11,",
+                    "DDownButtonMappingIds": "P0-B1024-SDLB12,",
+                    "DLeftButtonMappingIds": "P0-B512-SDLB13,",
+                    "DRightButtonMappingIds": "P0-B256-SDLB14,"
+                },
+                "LeftStick": {
+                    "LeftAxisDirectionMappingIds": "P0-S0-D0-SDLA0-ADN,",
+                    "RightAxisDirectionMappingIds": "P0-S0-D1-SDLA0-ADP,",
+                    "UpAxisDirectionMappingIds": "P0-S0-D2-SDLA1-ADN,",
+                    "DownAxisDirectionMappingIds": "P0-S0-D3-SDLA1-ADP,"
+                },
+                "RightStick": {
+                    "LeftAxisDirectionMappingIds": "P0-S1-D0-SDLA2-ADN,",
+                    "RightAxisDirectionMappingIds": "P0-S1-D1-SDLA2-ADP,",
+                    "UpAxisDirectionMappingIds": "P0-S1-D2-SDLA3-ADN,",
+                    "DownAxisDirectionMappingIds": "P0-S1-D3-SDLA3-ADP,"
+                }
+            }
+        }
+    }
+}

@@ -284,6 +284,11 @@ The bindings live in `ux0:data/battleship/BattleShip.cfg.json` (created on first
 launch). Pull it over FTP with vitacompanion, edit, push it back, relaunch. It
 must stay valid JSON.
 
+A ready-to-edit copy of the default layout is checked in at
+[`port/vita/BattleShip.cfg.controller-template.json`](port/vita/BattleShip.cfg.controller-template.json) —
+either drop it in whole as `BattleShip.cfg.json`, or merge just its
+`CVars.gControllers` object into your existing file.
+
 The button bindings are under `CVars → gControllers → ButtonMappings`. Each entry
 looks like:
 
