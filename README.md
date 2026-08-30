@@ -112,7 +112,13 @@ Everything below is toggleable in-game from the ESC menu.
 
 ### Rollback netcode & online play
 
-Work in progress.
+Work in progress on the desktop platforms.
+
+**PS Vita** (as of 1.3): local ad-hoc **and** online netplay with predictive
+rollback, host-configurable match rules, optional self-hosted matchmaking and
+UPnP automatic port forwarding. See
+[Playing online (PS Vita)](#playing-online-ps-vita) and the
+[changelog](CHANGELOG.md).
 
 ## Author's notes
 
@@ -252,6 +258,53 @@ three minutes and shows a progress bar; successful programs are then cached to
 `ux0:data/battleship/shader_cache`, so subsequent launches load them from disk
 instead of recompiling. Don't interrupt the app during this window — let the
 progress bar finish once.
+
+### Playing online (PS Vita)
+
+Netplay lives under **VS MODE → NETPLAY**. First set your name in
+**NETPLAY → SETTINGS → PLAYER NAME** (opens the system keyboard).
+
+**Local (same Wi-Fi / PS TV) — no setup:**
+
+1. Both consoles: **VS MODE → NETPLAY → LOCAL ADHOC**.
+2. One picks **HOST GAME**, the other **FIND GAME → A** to join. Accept the
+   system's ad-hoc connection dialog when it appears.
+3. Host presses **R** to set the match rules, both press **A** to ready up,
+   host presses **START** → character select → fight.
+
+**Over the internet — direct IP:**
+
+1. Both consoles: **VS MODE → NETPLAY → ONLINE**.
+2. **Host** picks **HOST GAME**. The lobby shows:
+   - `LOCAL <ip>` — your address on the LAN.
+   - `OPENING PORTS` → `PUBLIC <ip>` — the port is asking your router (UPnP) to
+     forward `26041/tcp` + `26042/udp` and reporting your public IP.
+   - If it can't (UPnP disabled on the router, or you're behind CGNAT), it
+     shows `PUBLIC <ip>` with a *"forward 26041 26042"* hint — forward those two
+     ports to the host console's LAN IP in your router settings manually.
+3. Give the **`PUBLIC` IP** to the other player.
+4. **Joiner** picks **DIRECT IP**, types the host's public IP on the system
+   keyboard, **A** to connect.
+5. From there it's the same as local: **R** for rules, **A** ready, host
+   **START**.
+
+A console behind CGNAT (common on mobile / some fibre) can still **join** a
+game — it just can't host, because inbound connections never reach it.
+
+**Over the internet — with a lobby board (skip typing IPs):**
+
+Run the tiny matchmaker so joiners can browse open lobbies:
+
+1. On any always-on box (Raspberry Pi, NAS, an old PC) build and run
+   `server/matchmaker` (see `server/matchmaker/deploy/README.md`): one Go
+   binary, one forwarded TCP port (`26050`), free dynamic-DNS for a stable
+   hostname. It stores no game data and never relays traffic — it only lists
+   lobbies.
+2. Both consoles: **NETPLAY → SETTINGS → SET SERVER** → your board's hostname.
+3. Host still needs its gameplay ports reachable (UPnP or manual, as above).
+4. **HOST GAME** on one console; **FIND GAME** on the other now lists the
+   lobby by name — **A** to join. Gameplay is still a direct connection between
+   the two consoles.
 
 ## Architecture
 

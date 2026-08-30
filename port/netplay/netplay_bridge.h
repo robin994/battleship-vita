@@ -132,6 +132,8 @@ int port_netplay_join_address(const char* ip);
 void port_netplay_get_join_address(char* out, int out_size);
 void port_netplay_set_rendezvous_server(const char* host);
 void port_netplay_get_rendezvous_server(char* out, int out_size);
+void port_netplay_get_public_ip(char* out, int out_size);
+int port_netplay_get_portmap_state(void);
 void port_netplay_cancel_activity(void);
 int port_netplay_get_discovery_count(void);
 int port_netplay_get_discovery_lobby(int index, char* host_name, int host_name_size,

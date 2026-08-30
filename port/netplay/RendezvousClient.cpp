@@ -274,6 +274,7 @@ void RendezvousClient::CloseHost() {
     mHostConnecting = false;
     mRegisterSent = false;
     mRegistered = false;
+    mPublicIp.clear();
     mHostRx.clear();
 }
 
@@ -444,10 +445,13 @@ void RendezvousClient::PollHost() {
         if (op == kOpRegistered) {
             FrameReader fr{fb.data(), fb.size()};
             mLobbyId = fr.u32();
+            std::string publicIp = fr.str();
+            mPublicIp = fr.err ? std::string() : std::move(publicIp);
             mRegistered = true;
             mNextPing = now + kPingInterval;
             mLastMessage = "LOBBY PUBLISHED";
-            port_log("[NETPLAY] rendezvous registered lobby=%u\n", mLobbyId);
+            port_log("[NETPLAY] rendezvous registered lobby=%u public=%s\n", mLobbyId,
+                     mPublicIp.empty() ? "?" : mPublicIp.c_str());
         }
     }
 

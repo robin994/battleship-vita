@@ -2,6 +2,7 @@
 
 #include "../port_log.h"
 #include "../vita/VitaNetworkPlatform.h"
+#include "../vita/VitaPortMapper.h"
 #ifdef __vita__
 #include "../mods/VitaModLoader.h"
 namespace ssb64 {
@@ -424,6 +425,7 @@ void NetworkManager::WorkerMain() {
                 mLobby.Stop(RejectReason::None, false);
                 mDiscovery.Stop();
                 mRendezvous.Stop();
+                ssb64::netplay::platform::ReleasePortMapping();
                 ForceTransition(NetplayState::Disconnected, "wifi disconnected");
             }
             nextPlatformPoll = now + kPlatformPollInterval;
@@ -435,6 +437,7 @@ void NetworkManager::WorkerMain() {
     mLobby.Stop(RejectReason::HostClosing, true);
     mDiscovery.Stop();
     mRendezvous.Stop();
+    platform::ReleasePortMapping();
     PublishSnapshots();
     platform::Shutdown();
     mNetworkInitialized.store(false, std::memory_order_release);
@@ -510,6 +513,7 @@ void NetworkManager::ProcessCommands() {
                 mLobby.Stop(RejectReason::None, true);
                 mDiscovery.Stop();
                 mRendezvous.Stop();
+                ssb64::netplay::platform::ReleasePortMapping();
                 ResetRoundState(true, true);
                 {
                     std::lock_guard<std::mutex> lock(mMutex);
@@ -552,6 +556,7 @@ void NetworkManager::ProcessCommands() {
                 mLobby.Stop(RejectReason::None, true);
                 mDiscovery.Stop();
                 mRendezvous.Stop();
+                ssb64::netplay::platform::ReleasePortMapping();
                 ResetRoundState(true, true);
                 if (!mDiscovery.StartClient(Mode(), kNetplayBuildId)) {
                     SetError(transport::LastError(), "discovery init");
@@ -587,6 +592,7 @@ void NetworkManager::ProcessCommands() {
                 mLobby.Stop(RejectReason::None, true);
                 mDiscovery.Stop();
                 mRendezvous.Stop();
+                ssb64::netplay::platform::ReleasePortMapping();
                 ResetRoundState(true, true);
                 NetplaySettings settings;
                 std::string localEndpoint;
@@ -625,6 +631,9 @@ void NetworkManager::ProcessCommands() {
                                           static_cast<uint8_t>(kMaxPlayers), kLobbyPort, kGameplayPort,
                                           sessionId);
                 }
+                if (Mode() == NetplayMode::Online && !mLocalIp.empty()) {
+                    ssb64::netplay::platform::RequestPortMapping(kLobbyPort, kGameplayPort, mLocalIp);
+                }
                 ForceTransition(NetplayState::HostingLobby, "local lobby created");
                 break;
             }
@@ -633,6 +642,7 @@ void NetworkManager::ProcessCommands() {
                 mGameplay.Stop();
                 mDiscovery.Stop();
                 mRendezvous.Stop();
+                ssb64::netplay::platform::ReleasePortMapping();
                 mLobby.Stop(RejectReason::None, true);
                 ResetRoundState(true, true);
                 NetplaySettings settings;
@@ -664,6 +674,7 @@ void NetworkManager::ProcessCommands() {
                 mLobby.Stop(RejectReason::None, true);
                 mDiscovery.Stop();
                 mRendezvous.Stop();
+                ssb64::netplay::platform::ReleasePortMapping();
                 ResetRoundState(true, true);
                 {
                     std::lock_guard<std::mutex> lock(mMutex);
@@ -812,6 +823,7 @@ void NetworkManager::ProcessCommands() {
                 mLobby.Stop(RejectReason::None, false);
                 mDiscovery.Stop();
                 mRendezvous.Stop();
+                ssb64::netplay::platform::ReleasePortMapping();
                 ResetRoundState(true, true);
                 {
                     std::lock_guard<std::mutex> lock(mMutex);
@@ -1357,9 +1369,11 @@ void NetworkManager::PublishSnapshots() {
         if (!dup) discovered.push_back(std::move(board));
     }
     LobbyView lobby = mLobby.Snapshot();
+    std::string publicIp = mRendezvous.PublicIp();
     std::lock_guard<std::mutex> lock(mMutex);
     mDiscoveredLobbies = std::move(discovered);
     mLobbyView = std::move(lobby);
+    mRendezvousPublicIp = std::move(publicIp);
 }
 
 int NetworkManager::ResolveInputDelay(const LobbyView& lobby) const {
@@ -1551,6 +1565,13 @@ void NetworkManager::SetRendezvousServer(const std::string& host) {
 std::string NetworkManager::RendezvousServer() const {
     std::lock_guard<std::mutex> lock(mMutex);
     return mSettings.rendezvousServer;
+}
+
+std::string NetworkManager::PublicIp() const {
+    std::string mapped = ssb64::netplay::platform::GetMappedExternalIp();
+    if (!mapped.empty()) return mapped;
+    std::lock_guard<std::mutex> lock(mMutex);
+    return mRendezvousPublicIp;
 }
 
 void NetworkManager::SetPlayerName(const std::string& name) {
@@ -2061,6 +2082,14 @@ void port_netplay_set_rendezvous_server(const char* host) {
 
 void port_netplay_get_rendezvous_server(char* out, int out_size) {
     ssb64::netplay::CopyStringOut(ssb64::netplay::NetworkManager::Instance().RendezvousServer(), out, out_size);
+}
+
+void port_netplay_get_public_ip(char* out, int out_size) {
+    ssb64::netplay::CopyStringOut(ssb64::netplay::NetworkManager::Instance().PublicIp(), out, out_size);
+}
+
+int port_netplay_get_portmap_state(void) {
+    return static_cast<int>(ssb64::netplay::platform::GetPortMapState());
 }
 
 int port_netplay_get_input_delay(void) {

@@ -962,6 +962,7 @@ private:
             }
             std::vector<uint8_t> reply;
             PutU32(reply, id);
+            PutStr(reply, "203.0.113.7");
             WriteFrame(fd, 0x83, reply);
             for (;;) {
                 if (!ReadFrame(fd, op, body)) break;
@@ -1035,6 +1036,7 @@ void TestRendezvousBoard() {
     host.StartHost("HOSTX", "1.3", 2, kLobbyPort, kGameplayPort, 0xABCD1234U);
     Require(WaitFor([&] { return host.HostRegistered(); }, [&] { host.Poll(); }),
             "rendezvous host register");
+    Require(host.PublicIp() == "203.0.113.7", "rendezvous host public ip echoed");
 
     RendezvousClient client;
     client.SetServer(endpoint);

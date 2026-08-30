@@ -38,6 +38,7 @@ public:
     std::vector<DiscoveredLobby> Lobbies() const { return mLobbies; }
     bool Hosting() const { return mMode == Mode::Hosting; }
     bool HostRegistered() const { return mMode == Mode::Hosting && mRegistered; }
+    std::string PublicIp() const { return mMode == Mode::Hosting ? mPublicIp : std::string(); }
     bool Fatal() const { return mFatal; }
     std::string LastMessage() const { return mLastMessage; }
 
@@ -83,6 +84,7 @@ private:
     uint16_t mHostGameplayPort = 0;
     uint32_t mHostBsnpSession = 0;
     uint32_t mLobbyId = 0;
+    std::string mPublicIp;
     uint8_t mPlayers = 1;
     uint8_t mStatus = 0;
     uint8_t mSentPlayers = 0xFF;

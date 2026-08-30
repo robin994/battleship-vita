@@ -43,6 +43,7 @@ func (s *Server) handleRegister(conn net.Conn, body []byte) {
 	}
 	bw := &bodyWriter{}
 	bw.u32(lobby.ID)
+	bw.str(lobby.PublicIP)
 	if lobby.writeControl(opRegistered, bw.b) != nil {
 		s.reg.Remove(lobby.ID)
 		conn.Close()

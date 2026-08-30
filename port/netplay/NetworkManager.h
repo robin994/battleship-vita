@@ -62,6 +62,7 @@ public:
     void SetShowStats(bool enabled);
     void SetRendezvousServer(const std::string& host);
     std::string RendezvousServer() const;
+    std::string PublicIp() const;
     void SetHostStage(int stage);
     void SetHostStocks(int stocks);
     void SetHostTimeUnits(int units);
@@ -202,6 +203,7 @@ private:
     std::string mLocalIp;
     std::string mLocalMac;
     std::string mLastError;
+    std::string mRendezvousPublicIp;
     NetplaySettings mSettings{};
     std::deque<Command> mCommands;
     std::vector<DiscoveredLobby> mDiscoveredLobbies;
