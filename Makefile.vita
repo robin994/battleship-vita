@@ -85,7 +85,7 @@ DECOMP_NESTED_DIRS := $(shell find decomp/src/ft decomp/src/gr decomp/src/it dec
 GAME_SOURCES := decomp/src/credits decomp/src/ef decomp/src/gm $(DECOMP_NESTED_DIRS) decomp/src/if \
 	decomp/src/lb decomp/src/mp decomp/src/sys \
 	decomp/src/libultra/gu decomp/src/libultra/n_audio decomp/src/libultra/audio \
-		port port/audio port/bridge port/enhancements port/gui port/resource port/widescreen port/interpolation port/hooks port/mods port/netplay port/vita \
+		port port/audio port/bridge port/enhancements port/gui port/resource port/widescreen port/interpolation port/hooks port/hires port/mods port/netplay port/vita \
 	port/stubs port/css_icons debug_tools/gbi_trace debug_tools/acmd_trace
 
 SOURCES := $(LUS_SOURCES) $(TORCH_SOURCES) $(GAME_SOURCES)
@@ -335,6 +335,7 @@ CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-s
 	-DSSB64_VITA_SLOW_FRAME_DIAG=$(SSB64_VITA_SLOW_FRAME_DIAG) \
 	-DSSB64_VITA_TRIPLE_BUFFERING=$(SSB64_VITA_TRIPLE_BUFFERING) \
 	-D__vita__ -DSSB64_VITA_BUILD=1 \
+	-DPORT_HIRES_ENABLED=1 \
 	-DDISABLE_SCRIPTING=1 \
 	-I$(VITAGL_DIR)/source \
 	$(foreach dir,$(INCLUDES),-I$(dir)) -fno-strict-aliasing -DMA_NO_RUNTIME_LINKING \
@@ -345,7 +346,7 @@ CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-s
 	-DAVOID_UB=1 -DF3DEX_GBI_2=1 -DNON_MATCHING=1 -DNON_EQUIVALENT=1 -DPORT=1 -DN_MICRO=1 \
 	-D_USE_MATH_DEFINES -DVERSION_US=1 -DREGION_US=1 \
 	-DSSB64_APP_NAME=\"BattleShip\" -DSSB64_O2R_NAME=\"BattleShip.o2r\" \
-	-DBATTLESHIP_CURRENT_VERSION=\"1.3\" -DSSB64_ASSET_RECIPE_HASH=\"vita-manual-build\" \
+	-DBATTLESHIP_CURRENT_VERSION=\"1.4\" -DSSB64_ASSET_RECIPE_HASH=\"vita-manual-build\" \
 	-DCVAR_VSYNC_ENABLED=\"gVsyncEnabled\" -DCVAR_Z_FIGHTING_MODE=\"gZFightingMode\" \
 	-DCVAR_INTERNAL_RESOLUTION=\"gInternalResolution\" -DCVAR_MSAA_VALUE=\"gMSAAValue\" \
 	-DCVAR_SDL_WINDOWED_FULLSCREEN=\"gSdlWindowedFullscreen\" -DCVAR_TEXTURE_FILTER=\"gTextureFilter\" \

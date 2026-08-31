@@ -9,7 +9,7 @@ import (
 
 func main() {
 	tcpAddr := flag.String("tcp", ":26050", "TCP listen address")
-	build := flag.String("build", "1.3", "required client build id")
+	build := flag.String("build", "1.4", "required client build id")
 	token := flag.String("token", "", "optional shared token; empty = no token check")
 	flag.Parse()
 

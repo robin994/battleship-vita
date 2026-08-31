@@ -71,7 +71,7 @@ Check: `ss -tlnp | grep 26050`.
 | flag | default | meaning |
 |------|---------|---------|
 | `-tcp` | `:26050` | TCP listen address |
-| `-build` | `1.3` | required client build id (`BATTLESHIP_CURRENT_VERSION`) |
+| `-build` | `1.4` | required client build id (`BATTLESHIP_CURRENT_VERSION`) |
 | `-token` | `""` | optional shared token; if set, the Vita build must carry the same `kRendezvousToken`. Empty = open. |
 
 ## Client config

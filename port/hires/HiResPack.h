@@ -8,8 +8,8 @@
  *   <anything>#<rgba8CRC32>#<fmt>#<siz>[_<anything>].png
  *
  * A pack may be either a folder of loose PNGs OR a .zip dropped straight into
- * mods/ — the distributed pack format. Zips are read in place (libzip +
- * stbi_load_from_memory at decode time), so there is no extraction step on
+ * mods/ — the distributed pack format. Zips are read in place (libzip plus
+ * the platform PNG decoder at decode time), so there is no extraction step on
  * any platform: desktop users drop the zip into mods/, and the Android
  * importer copies the downloaded zip there. Loose PNGs and zip members are
  * indexed identically; only the decode source differs.
@@ -52,11 +52,12 @@ inline constexpr int kHiResEnabledDefault = 1;
 
 // Decoded-RGBA8 LRU budget default, in MB (overridable at runtime via the
 // gHiResTextures.CacheBudgetMB CVar, read in HiResPack::Init). Desktop can
-// afford a large cache; Android runs under a far tighter per-app footprint
-// (the LMK reaps the foreground app well below desktop RAM limits), so it
-// defaults much lower. Floored at kMinLruBudgetMB so a too-small value can't
-// make the cache thrash (re-decoding on every miss stalls the render thread).
-#if defined(__ANDROID__)
+// afford a large cache; mobile targets run under a far tighter memory budget,
+// so they default much lower. Vita keeps this especially small because the
+// decoded RGBA8 copy exists alongside the GPU texture cache.
+#if defined(__vita__)
+inline constexpr int kDefaultLruBudgetMB = 32;
+#elif defined(__ANDROID__)
 inline constexpr int kDefaultLruBudgetMB = 128;
 #else
 inline constexpr int kDefaultLruBudgetMB = 512;
@@ -68,7 +69,9 @@ inline constexpr int kMinLruBudgetMB = 16;
 // single pathological upscale can't blow the budget / GPU upload in one shot —
 // the LRU never evicts its just-inserted tail, so a lone over-budget entry
 // would otherwise exceed the cap outright. 0 = uncapped (desktop).
-#if defined(__ANDROID__)
+#if defined(__vita__)
+inline constexpr uint32_t kMaxPackTexels = 1024u * 1024u; // 4 MB RGBA8
+#elif defined(__ANDROID__)
 inline constexpr uint32_t kMaxPackTexels = 2048u * 2048u; // 16 MB RGBA8
 #else
 inline constexpr uint32_t kMaxPackTexels = 0u;
@@ -99,7 +102,7 @@ struct PackStats {
 struct LookupStats {
     uint64_t lookups;     // every Lookup() call (one per cache miss)
     uint64_t hits;        // resolved to a decoded RGBA8 buffer
-    uint64_t decodeFails; // index hit but stbi_load failed (entry now removed)
+    uint64_t decodeFails; // index hit but PNG decode failed (entry now removed)
 };
 
 class HiResPack {

@@ -414,6 +414,10 @@ int ApiFighterJointWorldPosition(void *fighterGObj, int jointId,
     return port_mod_fighter_joint_world_position(fighterGObj, jointId, outX, outY, outZ);
 }
 
+void ApiFighterSpecialHiMap(void *fighterGObj, float landingLag) {
+    port_mod_fighter_special_hi_map(fighterGObj, landingLag);
+}
+
 int ApiProjectileSpawnBuiltin(BattleShipVitaModHandle handle, uint32_t projectileKind,
                               void *ownerGObj,
                               float posX, float posY, float posZ,
@@ -477,6 +481,7 @@ const BattleShipVitaModAPI kApi = {
     ApiFighterCheckLanding,
     ApiFighterJointWorldPosition,
     ApiProjectileSpawnBuiltin,
+    ApiFighterSpecialHiMap,
 };
 
 std::string SanitizeFilename(const std::string &name) {

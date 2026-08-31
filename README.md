@@ -96,7 +96,7 @@ Everything below is toggleable in-game from the ESC menu.
 
 ### Textures & mods
 
-- **Hi-res texture packs** on desktop *and* Android (opt-in, read in place straight out of a `.zip`). Download GhostlyDark's pack from [evilgames.eu](https://evilgames.eu/texture-packs/ssb-reloaded.htm#pc).
+- **Hi-res texture packs** on desktop, Android *and* PS Vita (opt-in, read in place straight out of a `.zip`). Download GhostlyDark's pack from [evilgames.eu](https://evilgames.eu/texture-packs/ssb-reloaded.htm#pc); the Vita release bundles memory-tuned 1x / 1.5x / 2x downscales of it (see [Hi-res texture packs (PS Vita)](#hi-res-texture-packs-ps-vita)).
 - **Native C mod support** — write mods in C, compiled at runtime (TinyCC), with hot-reload, function detours, and a documented engine/fighter event catalog. See [`docs/modding.md`](docs/modding.md). *(Desktop only; scripting is disabled on Android.)*
 
 ### Controls
@@ -258,6 +258,34 @@ three minutes and shows a progress bar; successful programs are then cached to
 `ux0:data/battleship/shader_cache`, so subsequent launches load them from disk
 instead of recompiling. Don't interrupt the app during this window — let the
 progress bar finish once.
+
+#### Hi-res texture packs (PS Vita)
+
+The Vita build reads hi-res texture packs the same way the desktop and Android
+builds do: drop a pack `.zip` into `ux0:data/battleship/mods/` and it is read in
+place — no extraction step. PNGs are decoded on demand through libpng (faster
+than stb_image on the Vita's CPU) into a small LRU cache (32 MB by default,
+`gHiResTextures.CacheBudgetMB` to override), and any single texture larger than
+1024×1024 falls back to the game's native texture so one oversized upscale can't
+blow the memory budget.
+
+Because the full-resolution *SSB Reloaded* pack is far too large for the Vita's
+RAM, the [1.4 release](https://github.com/robin994/battleship-vita/releases)
+ships three memory-tuned downscales of it — pick **one** and copy it (still
+zipped) to `ux0:data/battleship/mods/`. **`texture_pack_1.5x.zip` is the
+recommended choice**: it's a clear visual upgrade with no noticeable
+performance cost. `1x` is barely distinguishable from the native textures, and
+`2x` visibly slows the system down.
+
+| Pack | Scale | Notes |
+|------|-------|-------|
+| `texture_pack_1x.zip` | 1× | lightest, but only a marginal improvement over native — not really worth it |
+| `texture_pack_1.5x.zip` | 1.5× | **recommended** — sharper textures, no performance hit |
+| `texture_pack_2x.zip` | 2× | sharpest, but slows the system down; only if you accept the frame-rate cost |
+
+Don't drop more than one in at once — every pack in `mods/` is indexed and the
+last one scanned wins each texture, wasting memory. The same three zips are kept
+in the repo under [`mods/texture_pack/`](mods/texture_pack/).
 
 ### Controls (PS Vita)
 
@@ -617,7 +645,7 @@ PRs are welcome from anyone. If you're opening a bug report, the most useful thi
 - Asset pipeline: [Torch](https://github.com/HarbourMasters/Torch) — Copyright (c) 2023 Lywx (Harbour Masters), MIT-licensed. Vendored as the `torch/` submodule.
 - Menu fonts: [Montserrat](https://github.com/JulietaUla/Montserrat) and [Inconsolata](https://github.com/cyrealtype/Inconsolata), both bundled under the [SIL Open Font License 1.1](https://openfontlicense.org). License texts ship alongside the font files in [`assets/custom/fonts/`](assets/custom/fonts/).
 - Controller mappings: [`gamecontrollerdb.txt`](gamecontrollerdb.txt) from the [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB) project — bundled with every build and loaded at startup so more controllers work out of the box. Distributed under the zlib license; full text in [`LICENSE`](LICENSE).
-- High-resolution texture pack: *SSB Reloaded* by [GhostlyDark](https://github.com/GhostlyDark), distributed separately at [evilgames.eu](https://evilgames.eu/texture-packs/ssb-reloaded.htm#pc). Not bundled with this repository or its builds — the port loads it only if you download it yourself.
+- High-resolution texture pack: *SSB Reloaded* by [GhostlyDark](https://github.com/GhostlyDark), distributed separately at [evilgames.eu](https://evilgames.eu/texture-packs/ssb-reloaded.htm#pc). The desktop/Android builds load it only if you download it yourself. The PS Vita release (from 1.4) additionally bundles memory-tuned 1x / 1.5x / 2x downscales of that pack (`mods/texture_pack/`); these contain only upscaled renditions of the game's own UI/stage/effect textures — no ROM-derived data. If you are the pack author and want these removed, open an issue.
 - Reference ports I learned from and adapted code from: [Starship](https://github.com/HarbourMasters/Starship) (SF64) and [Ship of Harkinian](https://github.com/HarbourMasters/Shipwright) (OoT) — both MIT-licensed by The Harbour Masters; see [`LICENSE`](LICENSE) for the per-file attribution.
 - Reference ports I learned from but did not borrow code from: [SM64 PC Port](https://github.com/sm64-port/sm64-port) (SM64), [SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart) (MK64).
 - Port work: me ([JRickey](https://github.com/JRickey)), with an enormous amount of help, debugging, and feature suggestions from contributors in our Discord server.

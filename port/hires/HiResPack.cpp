@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstring>
 #include <cstdio>
 #include <filesystem>
@@ -30,6 +31,11 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#if defined(__vita__)
+#include <png.h>
+#include <psp2/io/dirent.h>
+#endif
 
 namespace ssb64::hires {
 
@@ -226,6 +232,13 @@ private:
 // re-points it from the gHiResTextures.CacheBudgetMB CVar once config loads.
 LruCache gLru{ (size_t)kDefaultLruBudgetMB * 1024u * 1024u };
 
+#if defined(__vita__)
+uint64_t gVitaLruHits = 0;
+uint64_t gVitaDecodeCount = 0;
+uint64_t gVitaDecodeTotalUs = 0;
+uint64_t gVitaDecodeMaxUs = 0;
+#endif
+
 bool IsHexDigit(char c) noexcept {
     return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
 }
@@ -318,6 +331,77 @@ bool HasExt(std::string_view name, const char* ext) noexcept {
     return e[0] == '.' && (e[1] | 0x20) == ext[0] && (e[2] | 0x20) == ext[1] && (e[3] | 0x20) == ext[2];
 }
 
+#if defined(__vita__)
+// VitaSDK's std::filesystem::directory_entry::is_directory() can return EINVAL
+// for otherwise valid ux0: paths (observed with Reloaded pack filenames).  The
+// generic Directory::ListFiles() calls that status() path for every entry, so
+// one bad result aborts the whole recursive scan.  Use SceIo's directory API on
+// Vita instead: d_stat is populated by sceIoDread, so no extra status() syscall
+// is needed and an unreadable subdirectory only skips that subtree.
+std::vector<std::string> ListPackFilesVita(const std::string& root) {
+    std::vector<std::string> files;
+    std::vector<std::string> pending{root};
+    size_t loggedErrors = 0;
+    size_t suppressedErrors = 0;
+    constexpr size_t kMaxLoggedErrors = 8;
+
+    while (!pending.empty()) {
+        std::string dir = std::move(pending.back());
+        pending.pop_back();
+
+        SceUID dfd = sceIoDopen(dir.c_str());
+        if (dfd < 0) {
+            if (loggedErrors < kMaxLoggedErrors) {
+                port_log("HiResPack: cannot open directory %s (0x%08X) — skipping subtree\n",
+                         dir.c_str(), (unsigned int)dfd);
+                loggedErrors++;
+            } else {
+                suppressedErrors++;
+            }
+            continue;
+        }
+
+        for (;;) {
+            SceIoDirent ent{};
+            int rc = sceIoDread(dfd, &ent);
+            if (rc <= 0) {
+                if (rc < 0) {
+                    if (loggedErrors < kMaxLoggedErrors) {
+                        port_log("HiResPack: cannot read directory %s (0x%08X) — keeping entries scanned so far\n",
+                                 dir.c_str(), (unsigned int)rc);
+                        loggedErrors++;
+                    } else {
+                        suppressedErrors++;
+                    }
+                }
+                break;
+            }
+
+            std::string_view name = ent.d_name;
+            if (name == "." || name == "..") continue;
+
+            std::string path = dir;
+            if (!path.empty() && path.back() != '/') path.push_back('/');
+            path.append(name.data(), name.size());
+
+            if (SCE_S_ISDIR(ent.d_stat.st_mode) || SCE_SO_ISDIR(ent.d_stat.st_attr)) {
+                pending.emplace_back(std::move(path));
+            } else {
+                files.emplace_back(std::move(path));
+            }
+        }
+
+        sceIoDclose(dfd);
+    }
+
+    if (suppressedErrors != 0) {
+        port_log("HiResPack: suppressed %u additional Vita directory scan error(s)\n",
+                 (unsigned int)suppressedErrors);
+    }
+    return files;
+}
+#endif
+
 // Insert a parsed entry, applying the "last scan wins" collision rule (matches
 // the loose-file ordering) and updating stats. Shared by both scanners.
 void IndexEntry(const HashKey& key, PackEntry entry, PackStats& stats) {
@@ -408,6 +492,78 @@ bool ReadZipMember(const std::string& zipPath, const std::string& member,
     return rd >= 0 && (zip_uint64_t)rd == st.size;
 }
 
+#if defined(__vita__)
+enum class VitaDecodeResult {
+    Ok,
+    Failed,
+    Oversize,
+    OutOfMemory,
+};
+
+// stb_image's PNG inflater is convenient but very slow on Vita's ARM CPU,
+// especially for the 512-1024px textures used by Reloaded. libpng is already
+// linked by the Vita build and delegates DEFLATE to zlib, which is much faster
+// here. Decode directly into the LRU-owned RGBA vector to avoid stb's temporary
+// RGBA allocation plus the second full-image copy previously done by Lookup().
+VitaDecodeResult DecodePackEntryVita(const PackEntry& entry, DecodedTexture& tex,
+                                     std::string& error) {
+    png_image image{};
+    image.version = PNG_IMAGE_VERSION;
+
+    std::vector<uint8_t> zipBytes;
+    int began = 0;
+    if (entry.inZip()) {
+        if (!ReadZipMember(entry.container, entry.member, zipBytes)) {
+            error = "cannot read zip member";
+            return VitaDecodeResult::Failed;
+        }
+        began = png_image_begin_read_from_memory(&image, zipBytes.data(), zipBytes.size());
+    } else {
+        began = png_image_begin_read_from_file(&image, entry.container.c_str());
+    }
+
+    if (!began) {
+        error = image.message[0] ? image.message : "png begin-read failed";
+        png_image_free(&image);
+        return VitaDecodeResult::Failed;
+    }
+
+    if (image.width == 0 || image.height == 0 || image.width > 65535 || image.height > 65535) {
+        error = "invalid dimensions";
+        png_image_free(&image);
+        return VitaDecodeResult::Failed;
+    }
+
+    const size_t texels = (size_t)image.width * (size_t)image.height;
+    if (kMaxPackTexels != 0 && texels > kMaxPackTexels) {
+        tex.w = (uint16_t)image.width;
+        tex.h = (uint16_t)image.height;
+        png_image_free(&image);
+        return VitaDecodeResult::Oversize;
+    }
+
+    image.format = PNG_FORMAT_RGBA;
+    try {
+        tex.rgba.resize((size_t)PNG_IMAGE_SIZE(image));
+    } catch (const std::bad_alloc&) {
+        png_image_free(&image);
+        return VitaDecodeResult::OutOfMemory;
+    }
+
+    if (!png_image_finish_read(&image, nullptr, tex.rgba.data(), 0, nullptr)) {
+        error = image.message[0] ? image.message : "png finish-read failed";
+        tex.rgba.clear();
+        png_image_free(&image);
+        return VitaDecodeResult::Failed;
+    }
+
+    tex.w = (uint16_t)image.width;
+    tex.h = (uint16_t)image.height;
+    png_image_free(&image);
+    return VitaDecodeResult::Ok;
+}
+#endif
+
 } // namespace
 
 HiResPack& HiResPack::Get() {
@@ -423,6 +579,12 @@ bool HiResPack::Init() {
     mStats = {};
     gIndex.clear();
     gLru.Clear(); // drop decoded textures so a re-scan can't serve stale hits
+#if defined(__vita__)
+    gVitaLruHits = 0;
+    gVitaDecodeCount = 0;
+    gVitaDecodeTotalUs = 0;
+    gVitaDecodeMaxUs = 0;
+#endif
     // Close any zip handles from a prior Init before re-scanning.
     for (auto& [path, z] : gOpenZips) {
         if (z != nullptr) zip_close(z);
@@ -458,7 +620,12 @@ bool HiResPack::Init() {
     // symlink loop, a file removed mid-walk) — catch it so a junk folder just
     // disables the pack instead of taking down boot.
     try {
-        auto files = Directory::ListFiles(gModsRoot); // recursive
+        std::vector<std::string> files;
+#if defined(__vita__)
+        files = ListPackFilesVita(gModsRoot);
+#else
+        files = Directory::ListFiles(gModsRoot); // recursive
+#endif
         std::sort(files.begin(), files.end()); // deterministic collision-winner
 
         for (const std::string& path : files) {
@@ -526,15 +693,28 @@ const DecodedTexture* HiResPack::Lookup(uint8_t fmt, uint8_t siz,
         double rate = mLookupStats.lookups
             ? (100.0 * (double)mLookupStats.hits / (double)mLookupStats.lookups)
             : 0.0;
-        port_log("HiResPack: %llu lookups, %llu hits (%.1f%%), %llu decode-fails, LRU=%u MB\n",
+        port_log("HiResPack: %llu lookups, %llu hits (%.1f%%), %llu decode-fails, LRU=%u MB",
                  (unsigned long long)mLookupStats.lookups,
                  (unsigned long long)mLookupStats.hits,
                  rate,
                  (unsigned long long)mLookupStats.decodeFails,
                  (unsigned int)(gLru.Bytes() / (1024u * 1024u)));
+#if defined(__vita__)
+        const uint64_t avgUs = gVitaDecodeCount ? (gVitaDecodeTotalUs / gVitaDecodeCount) : 0;
+        port_log(" lru-hits=%llu decodes=%llu decode-avg=%llums max=%llums\n",
+                 (unsigned long long)gVitaLruHits,
+                 (unsigned long long)gVitaDecodeCount,
+                 (unsigned long long)(avgUs / 1000u),
+                 (unsigned long long)(gVitaDecodeMaxUs / 1000u));
+#else
+        port_log("\n");
+#endif
     }
 
     if (const DecodedTexture* hit = gLru.Get(key)) {
+#if defined(__vita__)
+        gVitaLruHits++;
+#endif
         mLookupStats.hits++;
         return hit;
     }
@@ -545,6 +725,39 @@ const DecodedTexture* HiResPack::Lookup(uint8_t fmt, uint8_t siz,
     }
 
     const PackEntry& entry = it->second;
+#if defined(__vita__)
+    DecodedTexture tex;
+    std::string decodeError;
+    const auto decodeStart = std::chrono::steady_clock::now();
+    VitaDecodeResult result = DecodePackEntryVita(entry, tex, decodeError);
+    const auto decodeEnd = std::chrono::steady_clock::now();
+    const uint64_t decodeUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                  decodeEnd - decodeStart).count();
+    gVitaDecodeCount++;
+    gVitaDecodeTotalUs += decodeUs;
+    gVitaDecodeMaxUs = std::max(gVitaDecodeMaxUs, decodeUs);
+
+    if (result == VitaDecodeResult::Oversize) {
+        port_log("HiResPack: %s decodes to %ux%u (> Vita %u-texel cap) - using native texture\n",
+                 entry.container.c_str(), (unsigned int)tex.w, (unsigned int)tex.h,
+                 (unsigned int)kMaxPackTexels);
+        gIndex.erase(it);
+        return nullptr;
+    }
+    if (result != VitaDecodeResult::Ok) {
+        port_log("HiResPack: libpng decode failed for %s%s%s (%s)\n",
+                 entry.container.c_str(), entry.inZip() ? " :: " : "",
+                 entry.inZip() ? entry.member.c_str() : "",
+                 result == VitaDecodeResult::OutOfMemory ? "out of memory" : decodeError.c_str());
+        gIndex.erase(it);
+        mLookupStats.decodeFails++;
+        return nullptr;
+    }
+
+    gLru.Insert(key, std::move(tex));
+    mLookupStats.hits++;
+    return gLru.Get(key);
+#else
     int w = 0, h = 0, ch = 0;
     uint8_t* raw = nullptr;
     if (entry.inZip()) {
@@ -590,6 +803,7 @@ const DecodedTexture* HiResPack::Lookup(uint8_t fmt, uint8_t siz,
     gLru.Insert(key, std::move(tex));
     mLookupStats.hits++;
     return gLru.Get(key);
+#endif
 }
 
 void HiResPack::MaybeDumpSource(uint8_t fmt, uint8_t siz,

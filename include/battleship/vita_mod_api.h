@@ -12,7 +12,7 @@ extern "C" {
 #endif
 
 #define BATTLESHIP_VITA_MOD_MAGIC 0x42534D44u /* 'BSMD' */
-#define BATTLESHIP_VITA_MOD_ABI_VERSION 8u
+#define BATTLESHIP_VITA_MOD_ABI_VERSION 9u
 
 typedef uint32_t BattleShipVitaModHandle;
 
@@ -80,6 +80,10 @@ typedef struct BattleShipVitaModAPI {
                                     void *owner_gobj,
                                     float pos_x, float pos_y, float pos_z,
                                     float vel_x, float vel_y, float vel_z);
+    /* Generalized Mario-style special-up collision path. Native fighter mods
+     * supply their own landing lag while the host retains collision/cliff
+     * ownership and the exact engine transition semantics. */
+    void (*fighter_special_hi_map)(void *fighter_gobj, float landing_lag);
 } BattleShipVitaModAPI;
 
 enum {

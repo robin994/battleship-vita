@@ -6,6 +6,45 @@ entries unless stated.
 
 ---
 
+## 1.4 — 2026-08-31
+
+Headline: **hi-res texture pack support on PS Vita**, plus a native
+Mario-style special-up mod hook.
+
+### Textures
+
+- Hi-res texture packs now work on the Vita, matching the desktop/Android
+  behaviour: drop a pack `.zip` into `ux0:data/battleship/mods/` and it is read
+  in place, no extraction step.
+- Vita-specific decode path: PNGs are decoded through **libpng** (much faster
+  than stb_image on the Vita CPU) straight into the LRU-cache buffer, avoiding
+  a second full-image copy.
+- Vita-tuned cache limits: 32 MB decoded-RGBA LRU budget by default
+  (`gHiResTextures.CacheBudgetMB` overrides), and a 1024×1024 per-texture cap —
+  anything larger transparently falls back to the native texture.
+- Directory scan on Vita uses `sceIoDread` directly instead of
+  `std::filesystem`, whose `is_directory()` returns `EINVAL` for some valid
+  `ux0:` pack paths and aborted the whole recursive scan.
+- The release bundles three memory-tuned downscales of GhostlyDark's *SSB
+  Reloaded* pack — `texture_pack_1x` / `1.5x` / `2x` — also kept in-repo under
+  `mods/texture_pack/`. **1.5x is recommended**: 1x is barely different from
+  native, 2x visibly slows the system.
+
+### Modding
+
+- New mod ABI (v9) entry point `fighter_special_hi_map(fighter_gobj,
+  landing_lag)` — a generalised Mario-style special-up collision/cliff path so
+  native fighter mods can supply their own landing lag while the host keeps
+  collision and engine-transition ownership.
+
+### Netplay
+
+- `BATTLESHIP_CURRENT_VERSION` / `kNetplayBuildId` → **1.4**. 1.4 clients only
+  match other 1.4 clients; the lobby-board matchmaker's default `-build` is
+  bumped to `1.4` to match (redeploy `server/matchmaker` if you self-host one).
+
+---
+
 ## 1.3 — 2026-08-30
 
 Headline: **netplay** (local ad-hoc and online), a reworked **controller

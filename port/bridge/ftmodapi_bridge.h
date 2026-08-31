@@ -18,6 +18,7 @@ void port_mod_fighter_set_wait_or_fall(void *fighter_gobj);
 int port_mod_fighter_check_landing(void *fighter_gobj);
 int port_mod_fighter_joint_world_position(void *fighter_gobj, int joint_id,
                                           float *out_x, float *out_y, float *out_z);
+void port_mod_fighter_special_hi_map(void *fighter_gobj, float landing_lag);
 int port_mod_projectile_spawn_fflower(void *owner_gobj,
                                       float pos_x, float pos_y, float pos_z,
                                       float vel_x, float vel_y, float vel_z);

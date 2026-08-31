@@ -16,7 +16,7 @@ func startTestServer(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go NewServer("1.3", "").Serve(ln)
+	go NewServer("1.4", "").Serve(ln)
 	t.Cleanup(func() { ln.Close() })
 	return ln.Addr().String()
 }
@@ -80,10 +80,10 @@ func doList(t *testing.T, addr, build string) []*bodyReader {
 
 func TestRegisterAndList(t *testing.T) {
 	addr := startTestServer(t)
-	hc, lobbyID := registerHost(t, addr, "1.3", "MYLOBBY", 4, 0xABCDEF01)
+	hc, lobbyID := registerHost(t, addr, "1.4", "MYLOBBY", 4, 0xABCDEF01)
 	defer hc.Close()
 
-	entries := doList(t, addr, "1.3")
+	entries := doList(t, addr, "1.4")
 	if len(entries) != 1 {
 		t.Fatalf("got %d entries", len(entries))
 	}
@@ -111,7 +111,7 @@ func TestRegisterAndList(t *testing.T) {
 
 func TestUpdatePlayerCount(t *testing.T) {
 	addr := startTestServer(t)
-	hc, _ := registerHost(t, addr, "1.3", "H", 4, 0)
+	hc, _ := registerHost(t, addr, "1.4", "H", 4, 0)
 	defer hc.Close()
 
 	bw := &bodyWriter{}
@@ -122,7 +122,7 @@ func TestUpdatePlayerCount(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	e := doList(t, addr, "1.3")[0]
+	e := doList(t, addr, "1.4")[0]
 	e.u32()
 	e.str()
 	e.u16()
@@ -140,7 +140,7 @@ func TestUpdatePlayerCount(t *testing.T) {
 
 func TestPingPong(t *testing.T) {
 	addr := startTestServer(t)
-	hc, _ := registerHost(t, addr, "1.3", "H", 4, 0)
+	hc, _ := registerHost(t, addr, "1.4", "H", 4, 0)
 	defer hc.Close()
 
 	if err := writeFrame(hc, opPing, nil); err != nil {
@@ -172,23 +172,23 @@ func TestRegisterBuildMismatch(t *testing.T) {
 
 func TestListBuildFilter(t *testing.T) {
 	addr := startTestServer(t)
-	hc, _ := registerHost(t, addr, "1.3", "H", 4, 0)
+	hc, _ := registerHost(t, addr, "1.4", "H", 4, 0)
 	defer hc.Close()
 	if n := len(doList(t, addr, "9.9")); n != 0 {
 		t.Fatalf("expected 0 entries for other build, got %d", n)
 	}
-	if n := len(doList(t, addr, "1.3")); n != 1 {
+	if n := len(doList(t, addr, "1.4")); n != 1 {
 		t.Fatalf("expected 1, got %d", n)
 	}
 }
 
 func TestControlDropRemovesLobby(t *testing.T) {
 	addr := startTestServer(t)
-	hc, _ := registerHost(t, addr, "1.3", "H", 4, 0)
+	hc, _ := registerHost(t, addr, "1.4", "H", 4, 0)
 	hc.Close()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(doList(t, addr, "1.3")) == 0 {
+		if len(doList(t, addr, "1.4")) == 0 {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)

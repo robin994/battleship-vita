@@ -12,7 +12,7 @@ func mkLobby(build, name string, max uint8) *Lobby {
 
 func TestRegistryRegisterListRemove(t *testing.T) {
 	r := NewRegistry()
-	l := mkLobby("1.3", "HOST", 4)
+	l := mkLobby("1.4", "HOST", 4)
 	if !r.Register(l) || l.ID == 0 {
 		t.Fatalf("register failed id=%d", l.ID)
 	}
@@ -28,7 +28,7 @@ func TestRegistryRegisterListRemove(t *testing.T) {
 
 func TestRegistryUpdate(t *testing.T) {
 	r := NewRegistry()
-	l := mkLobby("1.3", "H", 4)
+	l := mkLobby("1.4", "H", 4)
 	r.Register(l)
 	l.update(3, 1)
 	list := r.List()
@@ -39,7 +39,7 @@ func TestRegistryUpdate(t *testing.T) {
 
 func TestRegistrySweepTTL(t *testing.T) {
 	r := NewRegistry()
-	l := mkLobby("1.3", "H", 4)
+	l := mkLobby("1.4", "H", 4)
 	r.Register(l)
 	l.mu.Lock()
 	l.lastSeen = time.Now().Add(-2 * lobbyTTL)
@@ -53,11 +53,11 @@ func TestRegistrySweepTTL(t *testing.T) {
 func TestRegistryMaxLobbies(t *testing.T) {
 	r := NewRegistry()
 	for i := 0; i < maxLobbies; i++ {
-		if !r.Register(mkLobby("1.3", "H", 4)) {
+		if !r.Register(mkLobby("1.4", "H", 4)) {
 			t.Fatalf("register %d failed", i)
 		}
 	}
-	if r.Register(mkLobby("1.3", "H", 4)) {
+	if r.Register(mkLobby("1.4", "H", 4)) {
 		t.Fatal("expected cap rejection")
 	}
 }
