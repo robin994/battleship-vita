@@ -292,10 +292,11 @@ SSB64_VITA_DISABLE_VSYNC ?= 0
 
 # Frame-rate experiment #2: render (Fast3D walk + GPU draw + present) only
 # 1 out of every N task-manager ticks; game logic/audio still tick every
-# frame, since this only gates port_drain_pending_display_list(), not the
-# task manager. 1 = render every tick (default, no skip). 2 = render every
-# other tick. Relies on the existing GFX_PENDING_REPLACE/generation-guard
-# path in port/gameloop.cpp to safely discard a skipped tick's DL.
+# frame, since this only gates rendering, not the task manager. Values >1
+# force a global render stride (2 = render every other tick). At the default
+# value 1, Vita still applies a local 2:1 render/hold policy only in known
+# multi-fighter pressure scenes; skipped DLs are discarded immediately and VI
+# presents the last complete framebuffer while game logic/audio remain at 60 Hz.
 # Override with: make -f Makefile.vita SSB64_FRAMESKIP_STRIDE=2 ...
 SSB64_FRAMESKIP_STRIDE ?= 1
 
@@ -311,10 +312,12 @@ SSB64_FRAMESKIP_STRIDE ?= 1
 # Override with: make -f Makefile.vita SSB64_VITA_SCENE_DIAG=1 ...
 SSB64_VITA_SCENE_DIAG ?= 0
 
-# Low-overhead hardware profiler used while closing the remaining 60 FPS gap.
-# Unlike RUNTIME_DIAG this adds only a few frame-level clocks and emits output
-# when a frame actually misses its budget; no per-command/per-draw counters.
-SSB64_VITA_SLOW_FRAME_DIAG ?= 1
+# Hardware profiler used while closing the remaining 60 FPS gap. It adds
+# several process-time samples around each render plus integer command/flush/
+# triangle taps in Fast3D's hot path. Keep it compiled out of normal Vita
+# performance builds and opt in only when collecting a hardware trace.
+# Override with: make -f Makefile.vita SSB64_VITA_SLOW_FRAME_DIAG=1 ...
+SSB64_VITA_SLOW_FRAME_DIAG ?= 0
 
 # Triple buffering gives vitaGL one extra display buffer so a frame that
 # narrowly misses vblank does not immediately turn into a visible 30 FPS
@@ -365,6 +368,23 @@ CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-s
 
 CXXFLAGS = $(CFLAGS) -fexceptions -std=gnu++20 -fpermissive
 ASFLAGS  = $(CFLAGS)
+
+# Object dependency keyed by every compile-time Vita tuning switch above.
+# Source/header timestamps alone cannot detect a command-line define change;
+# that previously allowed an object built with diagnostics enabled (or a
+# different frameskip/vsync mode) to be silently reused by the next build.
+# Keep exactly one generated config stamp: changing any value below selects a
+# missing target, removes the previous stamp and therefore makes every object
+# rebuild once under the new flags. Switching back also rebuilds because the
+# old stamp was removed when the newer configuration became active.
+VITA_CONFIG_STAMP := build/.vita_config_$(SSB64_SOBJ_TRACE_DETAIL)_$(SSB64_VITA_RUNTIME_DIAG)_$(SSB64_VITA_DISABLE_VSYNC)_$(SSB64_FRAMESKIP_STRIDE)_$(SSB64_VITA_SCENE_DIAG)_$(SSB64_VITA_SLOW_FRAME_DIAG)_$(SSB64_VITA_TRIPLE_BUFFERING)_$(SSB64_VITA_SPDLOG_LEVEL)
+
+$(VITA_CONFIG_STAMP):
+	@mkdir -p build
+	@rm -f build/.vita_config_*
+	@touch $@
+
+$(OBJS): $(VITA_CONFIG_STAMP)
 
 all: build/battleship.vpk
 
@@ -430,6 +450,7 @@ objects: $(OBJS)
 
 clean: $(OBJS_CLEAN)
 	@rm -f $(DEPS)
+	@rm -f build/.vita_config_*
 	@rm -rf build/battleship.velf build/battleship.elf build/battleship.elf.unstripped.elf build/f build/eboot.bin build/battleship.vpk build/param.sfo
 
 # ── CSS stage asset extraction (port-introduced stages) ─────────────────────

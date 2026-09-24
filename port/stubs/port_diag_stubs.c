@@ -46,6 +46,48 @@ u32 port_diag_get_active_fighter_count(void)
 	return count;
 }
 
+u32 port_diag_is_vita_pressure_scene(void)
+{
+	static u32 sCachedFrame = 0xFFFFFFFFu;
+	static u8 sCachedScene = 0xFFu;
+	static u32 sCachedResult = 0;
+	u32 result = 0;
+	u8 scene = gSCManagerSceneData.scene_curr;
+
+	/* This is queried from the texture hook, potentially many times per frame.
+	 * Cache the answer for the current taskman frame/scene instead of walking
+	 * the four fighter slots for every texture load. */
+	if ((sCachedFrame == dSYTaskmanFrameCount) && (sCachedScene == scene))
+		return sCachedResult;
+
+	/* 3/4-player gameplay is already CPU/GPU heavy enough on Vita that
+	 * decoding/uploading replacement textures in the same frame is a poor
+	 * tradeoff. The 1P team intro scenes are special: they create many demo
+	 * fighters but reuse player slot 0, so active_fighter_count alone does not
+	 * reflect their true render load. */
+	if (port_diag_get_active_fighter_count() >= 3)
+		result = 1;
+
+	if ((result == 0) && (scene == nSCKind1PIntro))
+	{
+		switch (gSCManagerSceneData.spgame_stage)
+		{
+		case nSC1PGameStageYoshi:
+		case nSC1PGameStageKirby:
+		case nSC1PGameStageZako:
+			result = 1;
+			break;
+		default:
+			break;
+		}
+	}
+
+	sCachedFrame = dSYTaskmanFrameCount;
+	sCachedScene = scene;
+	sCachedResult = result;
+	return result;
+}
+
 const char *port_diag_get_scene_name(u8 id)
 {
 	switch (id) {

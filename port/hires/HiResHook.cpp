@@ -14,6 +14,10 @@
 #include <unordered_set>
 #include <vector>
 
+#ifdef __vita__
+extern "C" unsigned int port_diag_is_vita_pressure_scene(void);
+#endif
+
 namespace {
 
 // Diagnostic: when gHiResTextures.DumpMissRgba is enabled, each unique
@@ -128,6 +132,15 @@ void MaybeDumpMiss(uint8_t fmt, uint8_t siz, const uint8_t* rgba8, uint16_t w, u
 bool HiResHook(uint8_t fmt, uint8_t siz,
                const uint8_t* rgba8, uint16_t width, uint16_t height,
                const uint8_t** outBuf, uint16_t* outW, uint16_t* outH) {
+#ifdef __vita__
+    /* Check the cheap, frame-cached pressure gate first. In the exact scenes
+     * where hi-res replacement is intentionally suspended this avoids even
+     * the CVar map lookup on every texture request. */
+    if (port_diag_is_vita_pressure_scene() != 0) {
+        return false;
+    }
+#endif
+
     // Master enable lives in a CVar so the menu toggle takes effect
     // immediately (no relaunch). Default is platform-scaled (kHiResEnabledDefault
     // in HiResPack.h): on for desktop, OFF/opt-in for Android so a dropped-in

@@ -76,6 +76,13 @@ extern "C" void port_vi_simulate_vblank(void);
  * generation N+1, even if the numeric address has been reused. */
 extern "C" unsigned int portRelocGetLifetimeGeneration(void);
 
+#if defined(__vita__)
+extern "C" unsigned char port_diag_get_scene_curr(void);
+extern "C" unsigned char port_diag_get_stage_kind(void);
+extern "C" unsigned int port_diag_get_active_fighter_count(void);
+extern "C" unsigned int port_diag_is_vita_pressure_scene(void);
+#endif
+
 #if defined(__vita__) && defined(SSB64_VITA_SLOW_FRAME_DIAG) && SSB64_VITA_SLOW_FRAME_DIAG
 extern "C" uint32_t port_vita_get_last_pace_us(void);
 extern "C" uint32_t port_vita_get_last_swap_us(void);
@@ -87,10 +94,7 @@ extern "C" uint32_t port_vita_get_last_interpreter_end_us(void);
 extern "C" uint32_t port_vita_get_last_fast3d_commands(void);
 extern "C" uint32_t port_vita_get_last_fast3d_flushes(void);
 extern "C" uint32_t port_vita_get_last_fast3d_tris(void);
-extern "C" unsigned char port_diag_get_scene_curr(void);
-extern "C" unsigned char port_diag_get_stage_kind(void);
 extern "C" unsigned int port_diag_get_task_frame_count(void);
-extern "C" unsigned int port_diag_get_active_fighter_count(void);
 
 static uint32_t sVitaFrameDrawUs = 0;
 static uint32_t sVitaFramePaceUs = 0;
@@ -482,16 +486,60 @@ extern "C" void port_drain_pending_display_list(void);
  * Dropping the next N submitted DLs reproduces the held-frame behavior. */
 static int sSimLoadStallFrames = 0;
 
-#if defined(__vita__) && defined(SSB64_FRAMESKIP_STRIDE) && (SSB64_FRAMESKIP_STRIDE > 1)
-/* Frame-rate experiment: render (Fast3D walk + GPU draw + present) only
- * 1 out of every SSB64_FRAMESKIP_STRIDE task-manager ticks. Game logic and
- * audio are driven by the task manager, not by this call, so skipped ticks
- * don't slow the simulation down — they just leave sPendingDisplayList set
- * instead of draining it. The next real tick's port_submit_display_list()
- * either drains it late (still one tick behind, harmless) or, if a newer DL
- * has already replaced it, the existing GFX_PENDING_REPLACE/generation-guard
- * path in port_drain_pending_display_list() discards the skipped one safely. */
-static int sFrameSkipCounter = 0;
+#if defined(__vita__)
+/* Vita load shedding: rendering is the expensive half of a game tick, while
+ * simulation/audio stay on the task-manager clock. A skipped render is
+ * discarded immediately and the VI idle-present path reuses the last complete
+ * framebuffer, so game logic can keep advancing at 60 Hz without executing a
+ * stale reloc-backed display list later. SSB64_FRAMESKIP_STRIDE > 1 remains a
+ * global override; with the default stride 1 we only shed every other render
+ * in the known multi-fighter pressure scenes. */
+static unsigned int sVitaFrameSkipCounter = 0;
+static int sVitaRenderDecisionFrame = -1;
+static bool sVitaRenderThisFrame = true;
+
+static bool port_vita_should_render_frame(void)
+{
+	if (sVitaRenderDecisionFrame == sFrameCount) {
+		return sVitaRenderThisFrame;
+	}
+
+	sVitaRenderDecisionFrame = sFrameCount;
+
+#if defined(SSB64_FRAMESKIP_STRIDE) && (SSB64_FRAMESKIP_STRIDE > 1)
+	sVitaRenderThisFrame = ((sVitaFrameSkipCounter++ % SSB64_FRAMESKIP_STRIDE) == 0);
+#else
+	{
+		const bool pressure = port_diag_is_vita_pressure_scene() != 0;
+		static bool sWasPressure = false;
+		static unsigned int sPressurePhase = 0;
+		static unsigned int sTransitionLogs = 0;
+
+		if (!pressure) {
+			sPressurePhase = 0;
+			sVitaRenderThisFrame = true;
+		} else {
+			/* Render the first pressure frame, then alternate render/hold. */
+			if (!sWasPressure) {
+				sPressurePhase = 0;
+			}
+			sVitaRenderThisFrame = ((sPressurePhase++ & 1u) == 0u);
+		}
+
+		if (pressure != sWasPressure && sTransitionLogs < 32u) {
+			port_log("SSB64: VITA_RENDER_SHED active=%u scene=%u stage=%u fighters=%u stride=%u\n",
+			         pressure ? 1u : 0u,
+			         (unsigned int)port_diag_get_scene_curr(),
+			         (unsigned int)port_diag_get_stage_kind(),
+			         port_diag_get_active_fighter_count(), pressure ? 2u : 1u);
+			++sTransitionLogs;
+		}
+		sWasPressure = pressure;
+	}
+#endif
+
+	return sVitaRenderThisFrame;
+}
 #endif
 
 extern "C" int port_get_frame_count(void)
@@ -564,15 +612,18 @@ extern "C" void port_submit_display_list(void *dl)
 	 * reloc resource.  Deferring until PortPushFrame's tail lets a scene
 	 * transition free/reuse those heaps before Fast3D sees the commands.
 	 */
-	gbi_trace_set_vi_frame(sFrameCount + 1);
-#if defined(SSB64_FRAMESKIP_STRIDE) && (SSB64_FRAMESKIP_STRIDE > 1)
-	if ((sFrameSkipCounter++ % SSB64_FRAMESKIP_STRIDE) == 0) {
-		port_drain_pending_display_list();
-	}
-#else
-	port_drain_pending_display_list();
-#endif
-#endif
+		gbi_trace_set_vi_frame(sFrameCount + 1);
+		if (port_vita_should_render_frame()) {
+			port_drain_pending_display_list();
+		} else {
+			/* Do not leave this DL queued for PortPushFrame's tail drain: that
+			 * would render the supposedly skipped frame later in the same tick.
+			 * Dropping it now is also the safest lifetime policy because all raw
+			 * pointers inside it belong to the current scene generation. */
+			sPendingDisplayList = nullptr;
+			sPendingDisplayListGeneration = 0u;
+		}
+	#endif
 }
 
 /* Drain any deferred DL on the SDL_main thread. Called from PortPushFrame

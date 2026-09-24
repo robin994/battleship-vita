@@ -28,6 +28,10 @@ int port_save_read(uintptr_t offset, void *dst, size_t size);
 // Returns 0 on success, -1 on I/O error.
 int port_save_write(uintptr_t offset, const void *src, size_t size);
 
+// Write both redundant SRAM copies while holding one save lock and one file
+// handle. Used by lbBackupWrite() to avoid two synchronous storage cycles.
+int port_save_write_pair(uintptr_t offset_a, uintptr_t offset_b, const void *src, size_t size);
+
 #ifdef __cplusplus
 }
 #endif
