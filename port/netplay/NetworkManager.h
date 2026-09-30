@@ -96,7 +96,7 @@ public:
     bool GetMatchConfig(PortNetplayMatchConfig& config) const;
     void NotifyLoadingReady();
     bool MatchGateTick();
-    void SubmitStateHash(uint32_t frame, uint64_t hash);
+    void SubmitStateDigest(const PortNetplayStateDigest& digest);
     uint32_t DeterminismMismatchCount() const;
     bool GameplayActive() const;
     int ResolvedInputDelay() const { return mResolvedInputDelay.load(std::memory_order_acquire); }
@@ -180,7 +180,7 @@ private:
         uint8_t costume = 0;
         uint8_t shade = 0;
         uint32_t frame = 0;
-        uint64_t stateHash = 0;
+        PortNetplayStateDigest stateDigest{};
         MatchResultPayload matchResult{};
         PortNetplayMatchConfig matchConfig{};
         NetplayMode mode = NetplayMode::None;
@@ -228,8 +228,7 @@ private:
     int mMatchStartCountdown = -1;
 
     struct StateHashSample {
-        uint32_t frame = 0;
-        uint64_t hash = 0;
+        PortNetplayStateDigest digest{};
         bool valid = false;
     };
     static constexpr std::size_t kStateHashHistory = 64;
@@ -237,6 +236,7 @@ private:
     std::array<std::array<StateHashSample, kStateHashHistory>, kMaxPlayers> mRemoteStateHashes{};
     uint32_t mDeterminismMismatchCount = 0;
     uint32_t mFirstDeterminismMismatchFrame = UINT32_MAX;
+    uint32_t mDigestPartitionMismatchMask = 0;
     uint32_t mMatchId = 0;
     uint8_t mMatchParticipantMask = 0;
     MatchResultPayload mLocalMatchResult{};
@@ -303,7 +303,7 @@ void port_netplay_lobby_start(void);
 void port_netplay_get_lobby_message(char* out, int out_size);
 int port_netplay_get_protocol_version(void);
 void port_netplay_get_build_id(char* out, int out_size);
-void port_netplay_submit_state_hash(uint32_t frame, uint32_t hash_high, uint32_t hash_low);
+void port_netplay_submit_state_digest(const PortNetplayStateDigest* digest);
 uint32_t port_netplay_get_determinism_mismatch_count(void);
 
 }

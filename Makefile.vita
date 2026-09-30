@@ -329,6 +329,11 @@ SSB64_VITA_TRIPLE_BUFFERING ?= 1
 # intentionally required.
 SSB64_VITA_SPDLOG_LEVEL ?= 3
 
+# Netplay compatibility id. Keep the shipped/default baseline at 1.4, but make
+# it overrideable so experimental rollback builds cannot accidentally connect
+# to the known-good prerelease.
+BATTLESHIP_CURRENT_VERSION ?= 1.4
+
 CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-short-enums -fsigned-char -MMD -MP \
 	-DSSB64_SOBJ_TRACE_DETAIL=$(SSB64_SOBJ_TRACE_DETAIL) \
 	-DSSB64_VITA_RUNTIME_DIAG=$(SSB64_VITA_RUNTIME_DIAG) \
@@ -349,7 +354,7 @@ CFLAGS = -g -std=gnu11 -Wl,-q,--allow-multiple-definition -O3 -ffast-math -fno-s
 	-DAVOID_UB=1 -DF3DEX_GBI_2=1 -DNON_MATCHING=1 -DNON_EQUIVALENT=1 -DPORT=1 -DN_MICRO=1 \
 	-D_USE_MATH_DEFINES -DVERSION_US=1 -DREGION_US=1 \
 	-DSSB64_APP_NAME=\"BattleShip\" -DSSB64_O2R_NAME=\"BattleShip.o2r\" \
-	-DBATTLESHIP_CURRENT_VERSION=\"1.4\" -DSSB64_ASSET_RECIPE_HASH=\"vita-manual-build\" \
+	-DBATTLESHIP_CURRENT_VERSION=\"$(BATTLESHIP_CURRENT_VERSION)\" -DSSB64_ASSET_RECIPE_HASH=\"vita-manual-build\" \
 	-DCVAR_VSYNC_ENABLED=\"gVsyncEnabled\" -DCVAR_Z_FIGHTING_MODE=\"gZFightingMode\" \
 	-DCVAR_INTERNAL_RESOLUTION=\"gInternalResolution\" -DCVAR_MSAA_VALUE=\"gMSAAValue\" \
 	-DCVAR_SDL_WINDOWED_FULLSCREEN=\"gSdlWindowedFullscreen\" -DCVAR_TEXTURE_FILTER=\"gTextureFilter\" \
@@ -377,7 +382,7 @@ ASFLAGS  = $(CFLAGS)
 # missing target, removes the previous stamp and therefore makes every object
 # rebuild once under the new flags. Switching back also rebuilds because the
 # old stamp was removed when the newer configuration became active.
-VITA_CONFIG_STAMP := build/.vita_config_$(SSB64_SOBJ_TRACE_DETAIL)_$(SSB64_VITA_RUNTIME_DIAG)_$(SSB64_VITA_DISABLE_VSYNC)_$(SSB64_FRAMESKIP_STRIDE)_$(SSB64_VITA_SCENE_DIAG)_$(SSB64_VITA_SLOW_FRAME_DIAG)_$(SSB64_VITA_TRIPLE_BUFFERING)_$(SSB64_VITA_SPDLOG_LEVEL)
+VITA_CONFIG_STAMP := build/.vita_config_$(BATTLESHIP_CURRENT_VERSION)_$(SSB64_SOBJ_TRACE_DETAIL)_$(SSB64_VITA_RUNTIME_DIAG)_$(SSB64_VITA_DISABLE_VSYNC)_$(SSB64_FRAMESKIP_STRIDE)_$(SSB64_VITA_SCENE_DIAG)_$(SSB64_VITA_SLOW_FRAME_DIAG)_$(SSB64_VITA_TRIPLE_BUFFERING)_$(SSB64_VITA_SPDLOG_LEVEL)
 
 $(VITA_CONFIG_STAMP):
 	@mkdir -p build

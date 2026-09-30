@@ -40,6 +40,40 @@ typedef struct PortNetplayMatchResult {
 } PortNetplayMatchResult;
 
 enum {
+    PORT_NETPLAY_DIGEST_TOTAL = 0,
+    PORT_NETPLAY_DIGEST_RNG,
+    PORT_NETPLAY_DIGEST_BATTLE,
+    PORT_NETPLAY_DIGEST_FIGHTER0,
+    PORT_NETPLAY_DIGEST_FIGHTER1,
+    PORT_NETPLAY_DIGEST_FIGHTER2,
+    PORT_NETPLAY_DIGEST_FIGHTER3,
+    PORT_NETPLAY_DIGEST_STAGE,
+    PORT_NETPLAY_DIGEST_MAP,
+    PORT_NETPLAY_DIGEST_ITEMS,
+    PORT_NETPLAY_DIGEST_WEAPONS,
+    PORT_NETPLAY_DIGEST_HASH_COUNT
+};
+
+/* Explicit 32-bit fields keep this C ABI identical on Vita and host builds;
+ * the packet serializer still writes each member individually. */
+typedef struct PortNetplayStateDigest {
+    uint32_t frame;
+    uint32_t hash_high[PORT_NETPLAY_DIGEST_HASH_COUNT];
+    uint32_t hash_low[PORT_NETPLAY_DIGEST_HASH_COUNT];
+    int32_t rng_seed;
+    int32_t fighter_status[4];
+    int32_t fighter_motion[4];
+    int32_t fighter_damage[4];
+    int32_t fighter_stock[4];
+    uint32_t fighter_pos_x_bits[4];
+    uint32_t fighter_pos_y_bits[4];
+    uint32_t fighter_vel_x_bits[4];
+    uint32_t fighter_vel_y_bits[4];
+    uint32_t item_count;
+    uint32_t weapon_count;
+} PortNetplayStateDigest;
+
+enum {
     PORT_NETPLAY_RESULT_COMPLETED = 0,
     PORT_NETPLAY_RESULT_NO_CONTEST,
     PORT_NETPLAY_RESULT_PEER_DISCONNECTED,
@@ -165,6 +199,7 @@ void port_netplay_get_build_id(char* out, int out_size);
 int port_netplay_css_active(void);
 int port_netplay_css_is_host(void);
 int port_netplay_css_get_local_player(void);
+uint32_t port_netplay_css_get_session_id(void);
 int port_netplay_css_slot_connected(int slot);
 void port_netplay_css_submit_input(uint16_t buttons, int8_t stick_x, int8_t stick_y);
 int port_netplay_css_consume_input(int slot, uint16_t* buttons, uint16_t* button_tap,
@@ -175,7 +210,7 @@ void port_netplay_css_host_commit_match(const PortNetplayMatchConfig* config);
 int port_netplay_get_match_config(PortNetplayMatchConfig* out_config);
 void port_netplay_loading_ready(void);
 int port_netplay_match_gate_tick(void);
-void port_netplay_submit_state_hash(uint32_t frame, uint32_t hash_high, uint32_t hash_low);
+void port_netplay_submit_state_digest(const PortNetplayStateDigest* digest);
 uint32_t port_netplay_get_determinism_mismatch_count(void);
 int port_netplay_gameplay_active(void);
 int port_netplay_gameplay_get_input_delay(void);

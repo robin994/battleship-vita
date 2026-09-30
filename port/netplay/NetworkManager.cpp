@@ -200,19 +200,151 @@ bool DecodeMatchConfigPayload(const std::vector<uint8_t>& payload, uint32_t& mat
     return true;
 }
 
-bool EncodeStateHashPayload(uint32_t frame, uint64_t hash, std::vector<uint8_t>& payload) {
-    payload.clear();
-    PayloadWriter writer(payload);
-    return writer.U32(frame) && writer.U32(static_cast<uint32_t>(hash >> 32)) &&
-           writer.U32(static_cast<uint32_t>(hash));
+constexpr uint8_t kStateDigestPayloadVersion = 1;
+static_assert((1U + sizeof(PortNetplayStateDigest)) <= kMaxPayloadBytes,
+              "state digest diagnostic payload must fit the lobby packet budget");
+
+uint64_t DigestHash(const PortNetplayStateDigest& digest, std::size_t index) {
+    if (index >= PORT_NETPLAY_DIGEST_HASH_COUNT) return 0;
+    return (static_cast<uint64_t>(digest.hash_high[index]) << 32) | digest.hash_low[index];
 }
 
-bool DecodeStateHashPayload(const std::vector<uint8_t>& payload, uint32_t& frame, uint64_t& hash) {
-    uint32_t high = 0;
-    uint32_t low = 0;
+const char* DigestPartitionName(std::size_t index) {
+    static constexpr const char* kNames[PORT_NETPLAY_DIGEST_HASH_COUNT] = {
+        "total", "rng", "battle", "fighter0", "fighter1", "fighter2", "fighter3",
+        "stage", "map", "items", "weapons"
+    };
+    return index < PORT_NETPLAY_DIGEST_HASH_COUNT ? kNames[index] : "unknown";
+}
+
+std::size_t FirstDigestPartitionMismatch(const PortNetplayStateDigest& local,
+                                         const PortNetplayStateDigest& remote) {
+    for (std::size_t index = PORT_NETPLAY_DIGEST_RNG; index < PORT_NETPLAY_DIGEST_HASH_COUNT; ++index) {
+        if (DigestHash(local, index) != DigestHash(remote, index)) return index;
+    }
+    return PORT_NETPLAY_DIGEST_TOTAL;
+}
+
+void LogStateDigestMismatch(const PortNetplayStateDigest& local, const PortNetplayStateDigest& remote,
+                            uint8_t remotePlayer) {
+    const std::size_t partition = FirstDigestPartitionMismatch(local, remote);
+    const uint64_t localTotal = DigestHash(local, PORT_NETPLAY_DIGEST_TOTAL);
+    const uint64_t remoteTotal = DigestHash(remote, PORT_NETPLAY_DIGEST_TOTAL);
+    const uint64_t localPart = DigestHash(local, partition);
+    const uint64_t remotePart = DigestHash(remote, partition);
+
+    port_log("[NETPLAY][DET] FIRST STATE DIGEST MISMATCH frame=%u remote=P%u category=%s "
+             "local=%08X%08X remote=%08X%08X part=%08X%08X/%08X%08X rng_seed=%08X/%08X counts=%u/%u:%u/%u\n",
+             local.frame, static_cast<unsigned>(remotePlayer + 1), DigestPartitionName(partition),
+             static_cast<uint32_t>(localTotal >> 32), static_cast<uint32_t>(localTotal),
+             static_cast<uint32_t>(remoteTotal >> 32), static_cast<uint32_t>(remoteTotal),
+             static_cast<uint32_t>(localPart >> 32), static_cast<uint32_t>(localPart),
+             static_cast<uint32_t>(remotePart >> 32), static_cast<uint32_t>(remotePart),
+             static_cast<uint32_t>(local.rng_seed), static_cast<uint32_t>(remote.rng_seed),
+             local.item_count, remote.item_count, local.weapon_count, remote.weapon_count);
+
+    if (partition >= PORT_NETPLAY_DIGEST_FIGHTER0 && partition <= PORT_NETPLAY_DIGEST_FIGHTER3) {
+        const std::size_t fighter = partition - PORT_NETPLAY_DIGEST_FIGHTER0;
+        port_log("[NETPLAY][DET] FIRST FIGHTER DIFF p%u status=%d/%d motion=%d/%d damage=%d/%d stock=%d/%d "
+                 "pos=(%08X,%08X)/(%08X,%08X) vel=(%08X,%08X)/(%08X,%08X)\n",
+                 static_cast<unsigned>(fighter + 1),
+                 local.fighter_status[fighter], remote.fighter_status[fighter],
+                 local.fighter_motion[fighter], remote.fighter_motion[fighter],
+                 local.fighter_damage[fighter], remote.fighter_damage[fighter],
+                 local.fighter_stock[fighter], remote.fighter_stock[fighter],
+                 local.fighter_pos_x_bits[fighter], local.fighter_pos_y_bits[fighter],
+                 remote.fighter_pos_x_bits[fighter], remote.fighter_pos_y_bits[fighter],
+                 local.fighter_vel_x_bits[fighter], local.fighter_vel_y_bits[fighter],
+                 remote.fighter_vel_x_bits[fighter], remote.fighter_vel_y_bits[fighter]);
+    }
+}
+
+void LogNewStateDigestPartitions(const PortNetplayStateDigest& local, const PortNetplayStateDigest& remote,
+                                 uint8_t remotePlayer, uint32_t& loggedMask) {
+    const uint64_t localTotal = DigestHash(local, PORT_NETPLAY_DIGEST_TOTAL);
+    const uint64_t remoteTotal = DigestHash(remote, PORT_NETPLAY_DIGEST_TOTAL);
+
+    for (std::size_t partition = PORT_NETPLAY_DIGEST_RNG;
+         partition < PORT_NETPLAY_DIGEST_HASH_COUNT; ++partition) {
+        const uint32_t bit = 1U << partition;
+        const uint64_t localPart = DigestHash(local, partition);
+        const uint64_t remotePart = DigestHash(remote, partition);
+        if (localPart == remotePart || (loggedMask & bit) != 0) continue;
+
+        loggedMask |= bit;
+        port_log("[NETPLAY][DET] FIRST PARTITION MISMATCH frame=%u remote=P%u category=%s "
+                 "local=%08X%08X remote=%08X%08X total=%08X%08X/%08X%08X\n",
+                 local.frame, static_cast<unsigned>(remotePlayer + 1), DigestPartitionName(partition),
+                 static_cast<uint32_t>(localPart >> 32), static_cast<uint32_t>(localPart),
+                 static_cast<uint32_t>(remotePart >> 32), static_cast<uint32_t>(remotePart),
+                 static_cast<uint32_t>(localTotal >> 32), static_cast<uint32_t>(localTotal),
+                 static_cast<uint32_t>(remoteTotal >> 32), static_cast<uint32_t>(remoteTotal));
+
+        if (partition >= PORT_NETPLAY_DIGEST_FIGHTER0 && partition <= PORT_NETPLAY_DIGEST_FIGHTER3) {
+            const std::size_t fighter = partition - PORT_NETPLAY_DIGEST_FIGHTER0;
+            port_log("[NETPLAY][DET] FIRST FIGHTER DIFF p%u status=%d/%d motion=%d/%d damage=%d/%d stock=%d/%d "
+                     "pos=(%08X,%08X)/(%08X,%08X) vel=(%08X,%08X)/(%08X,%08X)\n",
+                     static_cast<unsigned>(fighter + 1),
+                     local.fighter_status[fighter], remote.fighter_status[fighter],
+                     local.fighter_motion[fighter], remote.fighter_motion[fighter],
+                     local.fighter_damage[fighter], remote.fighter_damage[fighter],
+                     local.fighter_stock[fighter], remote.fighter_stock[fighter],
+                     local.fighter_pos_x_bits[fighter], local.fighter_pos_y_bits[fighter],
+                     remote.fighter_pos_x_bits[fighter], remote.fighter_pos_y_bits[fighter],
+                     local.fighter_vel_x_bits[fighter], local.fighter_vel_y_bits[fighter],
+                     remote.fighter_vel_x_bits[fighter], remote.fighter_vel_y_bits[fighter]);
+        }
+    }
+}
+
+bool EncodeStateHashPayload(const PortNetplayStateDigest& digest, std::vector<uint8_t>& payload) {
+    payload.clear();
+    PayloadWriter writer(payload);
+    if (!writer.U8(kStateDigestPayloadVersion) || !writer.U32(digest.frame)) return false;
+    for (std::size_t i = 0; i < PORT_NETPLAY_DIGEST_HASH_COUNT; ++i) {
+        if (!writer.U32(digest.hash_high[i]) || !writer.U32(digest.hash_low[i])) return false;
+    }
+    if (!writer.U32(static_cast<uint32_t>(digest.rng_seed))) return false;
+    for (std::size_t i = 0; i < kMaxPlayers; ++i) {
+        if (!writer.U32(static_cast<uint32_t>(digest.fighter_status[i])) ||
+            !writer.U32(static_cast<uint32_t>(digest.fighter_motion[i])) ||
+            !writer.U32(static_cast<uint32_t>(digest.fighter_damage[i])) ||
+            !writer.U32(static_cast<uint32_t>(digest.fighter_stock[i])) ||
+            !writer.U32(digest.fighter_pos_x_bits[i]) || !writer.U32(digest.fighter_pos_y_bits[i]) ||
+            !writer.U32(digest.fighter_vel_x_bits[i]) || !writer.U32(digest.fighter_vel_y_bits[i])) {
+            return false;
+        }
+    }
+    return writer.U32(digest.item_count) && writer.U32(digest.weapon_count);
+}
+
+bool DecodeStateHashPayload(const std::vector<uint8_t>& payload, PortNetplayStateDigest& digest) {
+    uint8_t version = 0;
+    PortNetplayStateDigest decoded{};
     PayloadReader reader(payload.data(), payload.size());
-    if (!reader.U32(frame) || !reader.U32(high) || !reader.U32(low) || !reader.Empty()) return false;
-    hash = (static_cast<uint64_t>(high) << 32) | low;
+    if (!reader.U8(version) || version != kStateDigestPayloadVersion || !reader.U32(decoded.frame)) return false;
+    for (std::size_t i = 0; i < PORT_NETPLAY_DIGEST_HASH_COUNT; ++i) {
+        if (!reader.U32(decoded.hash_high[i]) || !reader.U32(decoded.hash_low[i])) return false;
+    }
+    uint32_t signedValue = 0;
+    if (!reader.U32(signedValue)) return false;
+    decoded.rng_seed = static_cast<int32_t>(signedValue);
+    for (std::size_t i = 0; i < kMaxPlayers; ++i) {
+        if (!reader.U32(signedValue)) return false;
+        decoded.fighter_status[i] = static_cast<int32_t>(signedValue);
+        if (!reader.U32(signedValue)) return false;
+        decoded.fighter_motion[i] = static_cast<int32_t>(signedValue);
+        if (!reader.U32(signedValue)) return false;
+        decoded.fighter_damage[i] = static_cast<int32_t>(signedValue);
+        if (!reader.U32(signedValue)) return false;
+        decoded.fighter_stock[i] = static_cast<int32_t>(signedValue);
+        if (!reader.U32(decoded.fighter_pos_x_bits[i]) || !reader.U32(decoded.fighter_pos_y_bits[i]) ||
+            !reader.U32(decoded.fighter_vel_x_bits[i]) || !reader.U32(decoded.fighter_vel_y_bits[i])) {
+            return false;
+        }
+    }
+    if (!reader.U32(decoded.item_count) || !reader.U32(decoded.weapon_count) || !reader.Empty()) return false;
+    digest = decoded;
     return true;
 }
 
@@ -478,6 +610,7 @@ void NetworkManager::ResetRoundState(bool clearMatchConfig, bool clearCssState) 
     mRemoteStateHashes = {};
     mDeterminismMismatchCount = 0;
     mFirstDeterminismMismatchFrame = UINT32_MAX;
+    mDigestPartitionMismatchMask = 0;
     mMatchParticipantMask = 0;
     mLocalMatchResult = {};
     mAuthoritativeMatchResult = {};
@@ -935,28 +1068,31 @@ void NetworkManager::ProcessCommands() {
 
                 {
                     std::lock_guard<std::mutex> lock(mMutex);
-                    const std::size_t index = command.frame % kStateHashHistory;
-                    mLocalStateHashes[index] = StateHashSample{command.frame, command.stateHash, true};
+                    const uint32_t frame = command.stateDigest.frame;
+                    const std::size_t index = frame % kStateHashHistory;
+                    mLocalStateHashes[index] = StateHashSample{command.stateDigest, true};
                     for (std::size_t player = 0; player < kMaxPlayers; ++player) {
                         if (player == lobby.localPlayerId) continue;
                         StateHashSample& remote = mRemoteStateHashes[player][index];
-                        if (!remote.valid || remote.frame != command.frame) continue;
-                        if (remote.hash != command.stateHash) {
+                        if (!remote.valid || remote.digest.frame != frame) continue;
+                        if (DigestHash(remote.digest, PORT_NETPLAY_DIGEST_TOTAL) !=
+                            DigestHash(command.stateDigest, PORT_NETPLAY_DIGEST_TOTAL)) {
                             ++mDeterminismMismatchCount;
                             if (mFirstDeterminismMismatchFrame == UINT32_MAX) {
-                                mFirstDeterminismMismatchFrame = command.frame;
-                                port_log("[NETPLAY][DET] FIRST STATE HASH MISMATCH frame=%u remote=P%u local=%08X%08X remote=%08X%08X\n",
-                                         command.frame, static_cast<unsigned>(player + 1),
-                                         static_cast<uint32_t>(command.stateHash >> 32), static_cast<uint32_t>(command.stateHash),
-                                         static_cast<uint32_t>(remote.hash >> 32), static_cast<uint32_t>(remote.hash));
+                                mFirstDeterminismMismatchFrame = frame;
+                                LogStateDigestMismatch(command.stateDigest, remote.digest,
+                                                       static_cast<uint8_t>(player));
                             }
+                            LogNewStateDigestPartitions(command.stateDigest, remote.digest,
+                                                        static_cast<uint8_t>(player),
+                                                        mDigestPartitionMismatchMask);
                         }
                         remote.valid = false;
                     }
                 }
 
                 std::vector<uint8_t> payload;
-                if (EncodeStateHashPayload(command.frame, command.stateHash, payload)) {
+                if (EncodeStateHashPayload(command.stateDigest, payload)) {
                     mLobby.SendSessionMessage(PacketType::StateHash, payload);
                 }
                 break;
@@ -1168,29 +1304,29 @@ void NetworkManager::PollNetworkServices() {
 
         if (event.type == PacketType::StateHash) {
             if (State() != NetplayState::InMatch || event.sourcePlayerId >= kMaxPlayers) continue;
-            uint32_t frame = 0;
-            uint64_t remoteHash = 0;
-            if (!DecodeStateHashPayload(event.payload, frame, remoteHash)) continue;
+            PortNetplayStateDigest remoteDigest{};
+            if (!DecodeStateHashPayload(event.payload, remoteDigest)) continue;
 
             const LobbyView currentLobby = mLobby.Snapshot();
             if (event.sourcePlayerId == currentLobby.localPlayerId) continue;
 
             std::lock_guard<std::mutex> lock(mMutex);
+            const uint32_t frame = remoteDigest.frame;
             const std::size_t index = frame % kStateHashHistory;
             const StateHashSample& local = mLocalStateHashes[index];
-            if (local.valid && local.frame == frame) {
-                if (local.hash != remoteHash) {
+            if (local.valid && local.digest.frame == frame) {
+                if (DigestHash(local.digest, PORT_NETPLAY_DIGEST_TOTAL) !=
+                    DigestHash(remoteDigest, PORT_NETPLAY_DIGEST_TOTAL)) {
                     ++mDeterminismMismatchCount;
                     if (mFirstDeterminismMismatchFrame == UINT32_MAX) {
                         mFirstDeterminismMismatchFrame = frame;
-                        port_log("[NETPLAY][DET] FIRST STATE HASH MISMATCH frame=%u remote=P%u local=%08X%08X remote=%08X%08X\n",
-                                 frame, event.sourcePlayerId + 1,
-                                 static_cast<uint32_t>(local.hash >> 32), static_cast<uint32_t>(local.hash),
-                                 static_cast<uint32_t>(remoteHash >> 32), static_cast<uint32_t>(remoteHash));
+                        LogStateDigestMismatch(local.digest, remoteDigest, event.sourcePlayerId);
                     }
+                    LogNewStateDigestPartitions(local.digest, remoteDigest, event.sourcePlayerId,
+                                                mDigestPartitionMismatchMask);
                 }
             } else {
-                mRemoteStateHashes[event.sourcePlayerId][index] = StateHashSample{frame, remoteHash, true};
+                mRemoteStateHashes[event.sourcePlayerId][index] = StateHashSample{remoteDigest, true};
             }
             continue;
         }
@@ -1919,12 +2055,12 @@ bool NetworkManager::MatchGateTick() {
     return true;
 }
 
-void NetworkManager::SubmitStateHash(uint32_t frame, uint64_t hash) {
+void NetworkManager::SubmitStateDigest(const PortNetplayStateDigest& digest) {
     if (State() != NetplayState::InMatch) return;
     Command command{};
     command.type = CommandType::StateHash;
-    command.frame = frame;
-    command.stateHash = hash;
+    command.frame = digest.frame;
+    command.stateDigest = digest;
     Enqueue(std::move(command));
 }
 
@@ -2443,6 +2579,10 @@ int port_netplay_css_get_local_player(void) {
     return lobby.localPlayerId < ssb64::netplay::kMaxPlayers ? static_cast<int>(lobby.localPlayerId) : -1;
 }
 
+uint32_t port_netplay_css_get_session_id(void) {
+    return ssb64::netplay::NetworkManager::Instance().Lobby().sessionId;
+}
+
 int port_netplay_css_slot_connected(int slot) {
     if (slot < 0 || slot >= static_cast<int>(ssb64::netplay::kMaxPlayers)) return 0;
     const auto lobby = ssb64::netplay::NetworkManager::Instance().Lobby();
@@ -2502,9 +2642,9 @@ int port_netplay_match_gate_tick(void) {
     return ssb64::netplay::NetworkManager::Instance().MatchGateTick() ? 1 : 0;
 }
 
-void port_netplay_submit_state_hash(uint32_t frame, uint32_t hash_high, uint32_t hash_low) {
-    const uint64_t hash = (static_cast<uint64_t>(hash_high) << 32) | hash_low;
-    ssb64::netplay::NetworkManager::Instance().SubmitStateHash(frame, hash);
+void port_netplay_submit_state_digest(const PortNetplayStateDigest* digest) {
+    if (digest == nullptr) return;
+    ssb64::netplay::NetworkManager::Instance().SubmitStateDigest(*digest);
 }
 
 uint32_t port_netplay_get_determinism_mismatch_count(void) {
